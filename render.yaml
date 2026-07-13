@@ -1,0 +1,49 @@
+# Render.com multi-service definition
+# SRS v2 §10 — Zero-Investment Deployment
+#
+# Deploy with: git push origin main
+# Render auto-detects this file and provisions both services.
+
+services:
+  # ── Backend — Spring Boot Web Service ──────────────────────────────────────
+  - type: web
+    name: edubridge-backend
+    runtime: java
+    plan: free                          # 750 hrs/mo; sleeps after 15 min idle
+    rootDir: backend
+    buildCommand: ./gradlew bootJar
+    startCommand: java -Dspring.profiles.active=prod -jar build/libs/edubridge-0.0.1-SNAPSHOT.jar
+    healthCheckPath: /api/auth/health   # Add a health endpoint if desired
+    envVars:
+      - key: DB_URL
+        sync: false                     # Set in Render dashboard — never committed
+      - key: DB_USERNAME
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: JAVA_TOOL_OPTIONS
+        value: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75"
+
+  # ── Frontend — React/Vite Static Site ─────────────────────────────────────
+  - type: static
+    name: edubridge-frontend
+    plan: free                          # Free forever for static sites
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: public, max-age=3600
+    routes:
+      # SPA fallback: all routes → index.html
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false                     # Set to https://edubridge-backend.onrender.com

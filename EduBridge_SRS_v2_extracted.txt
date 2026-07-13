@@ -1,0 +1,444 @@
+SOFTWARE REQUIREMENTS SPECIFICATION
+(IEEE 830 Extended Format)
+EduBridge
+An Offline-First, Peer-Synchronized, Adaptive Learning Infrastructure
+for Multi-School Rural Education Networks
+Version 2.0 — Expanded Scope (Post Zeroth-Review Revision)
+Sri Krishna College of Engineering and Technology, Coimbatore
+Department of Computer Science and Engineering — Batch No. 11
+Batch Members: Kirubashankar R (727723EUCS105)  |  Kirupa Sankar S (727723EUCS107)  |  Mugunthan M (727723EUCS127)  |  Madhankumar R (727724EUCS509)
+Supervisor: Dr. Kavitha M
+
+1. Introduction
+1.1 Purpose
+This document specifies the requirements for EduBridge, an offline-first, peer-synchronized, adaptive learning infrastructure for rural school clusters. Unlike the original single-school PWA concept, EduBridge is designed as deployable digital infrastructure: it must keep functioning when a school has no internet at all, when only one device in a cluster has occasional connectivity, and when parents have only basic feature phones. The specification below extends the original SetEdu/EduBridge scope with a peer-to-peer content mesh, a mastery-based adaptive engine, an offline AI tutor fallback, an SMS/USSD channel, and multi-tenant (School → Cluster → District) administration, so that the project represents a genuine systems-level contribution rather than a recombination of two existing LMS designs.
+1.2 Scope
+EduBridge provides:
+Digital learning resources (video, notes, slides, images) with offline-first delivery
+A peer-to-peer Local Content Mesh that propagates synced content between nearby devices without repeated internet access
+Quizzes and assessments with instant local (on-device) evaluation
+A Mastery Engine (Bayesian Knowledge Tracing) driving personalized content sequencing
+An AI Co-Pilot for teachers (RAG-based quiz/material generation grounded in uploaded curriculum) with a lightweight offline explainer fallback when no cloud AI is reachable
+Automatic background synchronization with conflict-resolved merge on reconnect
+Student performance analytics and a parent monitoring dashboard, extended with SMS/USSD alerts for feature-phone households
+Multilingual learning support (English, Tamil, extensible to further regional languages)
+Gamification (badges, leaderboards, milestone tracking)
+Multi-tenant administration across School, Cluster, and District levels for scalable rollout
+The platform's objective remains reducing the educational gap between rural and urban students, but with an explicit design target of working at cluster scale (multiple schools, hundreds of devices, intermittent shared connectivity) rather than a single well-connected institution.
+1.3 Objectives
+Provide quality, curriculum-aligned education to rural students independent of continuous connectivity.
+Enable one synced device to propagate content to an entire classroom/cluster via local peer-to-peer transfer.
+Model individual student mastery per topic using an interpretable probabilistic method (BKT), not just an LLM heuristic.
+Ensure AI-assisted tutoring degrades gracefully to a local, non-cloud-dependent mode rather than failing outright offline.
+Reach parents without smartphones through SMS/USSD notifications.
+Support multilingual education with dynamic language switching.
+Improve engagement through gamification without undermining genuine mastery signals.
+Allow teachers to track progress and auto-generate assessments from their own material.
+Provide a scalable administrative hierarchy so the platform can be piloted in one school and expanded to a district.
+
+2. Overall Description
+2.1 Product Perspective
+EduBridge is an Offline-First Progressive Web Application (PWA) that runs identically across mobile phones, tablets, laptops, and desktop computers through any modern browser, and can be installed like a native app. It differs from prior single-device offline solutions by treating a classroom or school as a connectivity unit rather than treating each device as independently responsible for its own sync: a single device that reaches the internet (a teacher's phone at a bus stop, a school office router with a data card) becomes a temporary sync hub, and content and results propagate to other devices in range over a Local Content Mesh (WebRTC data channels over WiFi-Direct/local WiFi, with a Bluetooth/Nearby fallback for very low-bandwidth pairing).
+2.2 Product Features Overview
+Layer
+Capability
+Why it matters here
+Content delivery
+Offline-first PWA + Service Worker cache
+Works with zero live connectivity
+Device-to-device
+Local Content Mesh (WebRTC/WiFi-Direct/BLE)
+One synced device serves an entire room
+Assessment
+On-device auto-evaluation + local storage
+No round-trip needed to grade objective items
+Personalization
+Bayesian Knowledge Tracing mastery model
+Interpretable, data-light, works on old hardware
+AI assistance
+Cloud LLM (Gemini) with quantized offline fallback
+AI features do not hard-fail without internet
+Parent reach
+Web dashboard + SMS/USSD gateway
+Covers feature-phone households
+Administration
+School → Cluster → District tenancy
+Same codebase scales from pilot to district rollout
+2.3 User Classes and Characteristics
+Student
+Access learning materials, watch or download videos, attempt quizzes offline or online
+View personal mastery map and recommended next topics
+Earn badges, view leaderboard position
+Teacher
+Upload study materials and videos; author quizzes manually or via AI Co-Pilot
+Monitor per-student and per-class mastery heatmaps and weak-topic clusters
+Trigger a local sync session to push content to the classroom's Content Mesh
+Parent
+View attendance, marks, and learning-progress summaries on the web dashboard
+Receive SMS/USSD alerts on a registered feature phone where no smartphone/app access exists
+School Administrator
+Manage users, courses, and school-level configuration
+Monitor school-wide sync health and device coverage
+Cluster / District Administrator (new role)
+View aggregated analytics across multiple schools
+Manage rollout, licensing of content packs, and cross-school reporting
+2.4 Operating Environment
+Client: any evergreen browser on Android, iOS, Windows, or ChromeOS supporting Service Workers, IndexedDB, and WebRTC data channels. Server: cloud-hosted Spring Boot API with PostgreSQL, reachable whenever any device in a cluster has connectivity. Offline AI: a quantized small language model bundled with the PWA for on-device inference on CPU-only hardware when the cloud LLM is unreachable.
+2.5 Design and Implementation Constraints
+Must remain fully usable with zero internet access for core learning and assessment flows.
+Must operate on low-spec hardware already found in rural labs (Intel i3 / 4GB RAM class machines, mid-range Android phones).
+Local Content Mesh must not depend on any device being a permanent 'server' — any synced device can act as a temporary hub.
+All student performance data cached offline must be encrypted at rest (AES-256 via the Web Crypto API) since devices may be shared or lost.
+2.6 Assumptions and Dependencies
+At least one device per cluster gains intermittent internet access (even weekly) for full district-level sync and AI model updates.
+Schools have a shared local WiFi router or hotspot, even without a WAN uplink, to support the Content Mesh.
+SMS/USSD delivery depends on a third-party telecom gateway (e.g., Twilio, or a local aggregator) and parent phone number registration.
+
+3. Research Contribution and Key Enhancements
+This section states explicitly what is new relative to the two base papers and the wider offline-EdTech literature, so it can be defended as a research contribution rather than a feature port.
+3.1 Local Content Mesh (Device-to-Device Propagation)
+Existing offline solutions (including both base papers) assume each device independently reaches the internet to sync. Field studies of rural connectivity consistently show the opposite: connectivity is scarce and shared, not per-device. Recent work on delay-tolerant and mesh-based rural networking demonstrates that treating mobile devices as intermittent 'data mules' that relay content over local links (WiFi-Direct, Bluetooth Low Energy) is a practical way to extend a single connectivity window to an entire room or village without any new infrastructure cost. EduBridge applies this principle at the application layer: any device that has just synced with the cloud advertises available content over a local WebRTC data channel; nearby devices discover it via a lightweight local broadcast and pull only the deltas they are missing, so thirty student devices can receive a new week's lessons from one teacher's phone without any of them touching the internet.
+3.2 Mastery-Based Adaptive Engine (Bayesian Knowledge Tracing)
+The original design routed all personalization through a single LLM call ('analyze performance, recommend content'), which is opaque, costly per request, and unusable offline. Educational data mining research has long used Bayesian Knowledge Tracing to maintain an interpretable, per-skill probability of mastery that updates after every response using four parameters — initial knowledge, learning rate, guess, and slip — and this model is cheap enough to run entirely on-device. EduBridge maintains a BKT mastery vector per student per topic locally in IndexedDB; the recommendation layer reads this vector to pick the next topic offline, and only calls the cloud LLM when a natural-language explanation or new quiz content needs to be generated, with the mastery estimate as grounding context rather than as the decision-maker itself.
+3.3 Graceful AI Degradation (Offline Tutor Fallback)
+A system billed as 'offline-first' that loses all AI-assisted explanation the moment the network drops is inconsistent. Recent research on offline-first LLM architectures for low-connectivity classrooms shows that a small, quantized language model can run acceptably (single-digit-second responses) on ordinary CPU-only school hardware, producing curriculum-aligned explanations at different reading levels. EduBridge adopts the same pattern: Gemini API is used online for richer generation (quiz authoring, detailed feedback), while a bundled quantized model answers simpler 'explain this again' requests locally when offline, so AI support is degraded, not absent, without connectivity.
+3.4 SMS/USSD Parent Channel
+Parent dashboards in both base papers assume smartphone and app access. In many rural households the parent's only device is a basic feature phone. Adding an SMS/USSD gateway for attendance and mark alerts extends the platform's reach to households the web dashboard cannot serve, directly strengthening the SDG 10 (Reduced Inequalities) claim rather than leaving it aspirational.
+3.5 Multi-Tenant, Multi-School Architecture
+The original scope targeted a single institution. Reframing the data model around a School → Cluster → District hierarchy, with row-level tenant isolation in PostgreSQL, turns the deliverable from a single-school prototype into a template for state or NGO-scale rollout — a materially larger claim that is still implementable within a final-year timeline because it is primarily a schema and access-control decision, not new UI surface.
+3.6 Summary of Contribution Relative to Base Papers
+Dimension
+Paper 1 (Android, IJIRT)
+Paper 2 (MERN, IJERT)
+EduBridge v2.0
+Cross-platform
+Android only
+Web only, online-only
+PWA, any device, offline + online
+Content sync unit
+Per-device only
+N/A (always online)
+Per-cluster via device mesh
+Personalization basis
+None
+Basic
+BKT mastery model + LLM grounded by it
+AI availability offline
+N/A
+N/A
+Degrades to on-device quantized model
+Parent reach
+App only
+Web only
+Web + SMS/USSD
+Administrative scale
+Single app
+Single deployment
+School / Cluster / District tenancy
+
+4. Literature Review
+4.1 Prior Work
+Paper 1 (IJIRT, 2026): A native Android application using Java/Kotlin with a Spring Boot backend, storing offline video and quiz data in a local SQLite/Room database.
+Paper 2 (IJERT, 2026): A MERN-stack web platform (React, Node.js, Express, MongoDB) for course delivery, quizzes, and progress tracking; assumes continuous connectivity.
+Rural mesh/DTN networking research (2024–2026): Studies on WiFi-Direct multi-hop ad-hoc networks, delay-tolerant 'data mule' architectures, and low-bandwidth mesh networks report that treating everyday mobile devices as relays materially extends the reach of a single connectivity point in rural and disaster-affected areas, and that link-aware routing keeps such networks reliable even with node churn.
+Offline-first LLM tutoring (2026): Work on quantized, hardware-aware local language models for classroom tutoring shows that running inference entirely on-device on ordinary CPU-only machines yields acceptable response latency (roughly one to three seconds) and positive learner outcomes without any cloud dependency.
+Bayesian Knowledge Tracing (Corbett & Anderson, and subsequent extensions): A long-standing, interpretable probabilistic framework for tracking a learner's per-skill mastery over time from sequences of correct/incorrect responses, still considered a strong, lightweight baseline for adaptive systems even alongside newer deep-learning knowledge-tracing methods.
+LMS and multimedia learning foundations (Hrastinski; Mayer): Establish that centralizing materials with progress tracking improves retention, and that well-designed multimedia (video plus interactive quizzes) improves engagement over static content.
+4.2 Gaps Addressed by EduBridge
+Android-only restriction in Paper 1, excluding desktop/lab machines and iOS.
+Full online dependency in Paper 2, unusable during connectivity outages.
+No personalization mechanism grounded in an interpretable learning model in either paper.
+No mechanism in either paper for extending a single connectivity window to multiple devices.
+No consideration of feature-phone parents or multi-school administrative scale.
+
+5. Functional Requirements
+Module 1: User Management
+FR1.1 Registration — Users register as Student, Teacher, Parent, or Administrator (School/Cluster/District).
+FR1.2 Login — Secure login with JWT-based session tokens.
+FR1.3 RBAC — Role-based access control restricts every endpoint and UI view by role and tenant.
+Module 2: Course and Content Management
+FR2.1 Course Creation — Teachers create courses with modules mapped to curriculum topics.
+FR2.2 Enrollment — Students enroll in courses available to their school/cluster.
+FR2.3 Content Upload — Teachers upload PDFs, PPTs, notes, images, and videos, tagged by topic and difficulty.
+Module 3: Offline Learning and Local Content Mesh
+FR3.1 Offline Storage — Downloaded materials, videos, and quiz attempts are stored in IndexedDB via Dexie.js, encrypted at rest.
+FR3.2 Content Mesh Advertisement — A device that has just synced with the cloud advertises its available content set over a local WebRTC data channel.
+FR3.3 Peer Discovery and Pull — Nearby devices discover advertising peers over local WiFi/BLE and pull only missing content deltas.
+FR3.4 Auto Synchronization — When any device regains internet access, it pushes locally queued quiz attempts and progress data to the backend, and pulls new content for re-advertisement to the mesh.
+FR3.5 Conflict Resolution — Concurrent offline edits (e.g., duplicate quiz attempts) are merged using last-write-wins with a client timestamp, with manual review flagged for conflicting teacher-authored content.
+Module 4: Video Learning
+FR4.1 Video Upload — Teachers upload videos, transcoded server-side to multiple bitrates.
+FR4.2 Adaptive Streaming — Students stream at a bitrate chosen automatically from measured network conditions.
+FR4.3 Offline Playback — Downloaded videos play fully offline from IndexedDB/Cache Storage.
+Module 5: Quiz, Assessment, and AI Co-Pilot
+FR5.1 Manual Quiz Creation — Teachers author quizzes manually with objective and short-answer items.
+FR5.2 AI-Assisted Quiz Generation — Teachers can request the AI Co-Pilot to draft a quiz from an uploaded document using retrieval-augmented generation, so questions are grounded in the teacher's own material rather than generic content.
+FR5.3 Offline Attempt and Local Evaluation — Objective questions are evaluated entirely on-device, online or offline.
+FR5.4 Instant Results — Scores are available immediately after submission, synced later if offline.
+Module 6: Adaptive Mastery Engine
+FR6.1 Mastery Tracking — A Bayesian Knowledge Tracing model updates a per-student, per-topic mastery probability after every graded response, computed on-device.
+FR6.2 Recommendation — The recommendation layer selects the next topic, video, or practice set for a student based on the current mastery vector, without requiring network access.
+FR6.3 LLM-Grounded Explanation — When online, the mastery vector is passed as context to the Gemini API to generate a natural-language explanation of a weak topic; when offline, the same request is served by the bundled quantized model.
+Module 7: Analytics Dashboards
+FR7.1 Student View — Marks, attendance, course completion, and personal mastery map.
+FR7.2 Teacher View — Class-wide mastery heatmap, weak-topic clustering, quiz performance trends.
+FR7.3 Parent View — Attendance, marks, and activity summaries on the web dashboard.
+FR7.4 Cluster/District View — Aggregated analytics across multiple schools for administrators.
+Module 8: Notifications (Web and SMS/USSD)
+FR8.1 In-App Alerts — Assignment and quiz reminders delivered via Firebase Cloud Messaging when online.
+FR8.2 SMS Fallback Gateway — Attendance and mark alerts sent to a parent's registered feature-phone number through a free-quota transactional SMS API, used only as a fallback channel to avoid any recurring cost.
+FR8.3 Delivery Fallback Logic — If a parent has no registered smartphone/app session within a configurable window, the system automatically falls back to SMS.
+Module 9: Gamification
+FR9.1 Badges — Students earn badges for milestones (topic mastery, streaks, quiz completion).
+FR9.2 Leaderboard — Class and school leaderboards, computed to avoid penalizing offline-first usage patterns (e.g., ranking is based on mastery gained, not just online activity).
+Module 10: Multilingual Support
+FR10.1 Language Selection — English and Tamil at launch, with an extensible translation-resource architecture for additional regional languages.
+FR10.2 Dynamic Switching — Users switch language at any time without losing session state.
+Module 11: Multi-Tenant Administration
+FR11.1 Tenant Hierarchy — Administrators are scoped to School, Cluster, or District level, with data visibility restricted accordingly.
+FR11.2 Content Pack Distribution — District administrators can push curated content packs to all schools in a cluster, which then propagate further via the Local Content Mesh.
+
+6. Non-Functional Requirements
+6.1 Performance
+Server response time under 3 seconds for 95% of requests under normal load.
+Support 500+ concurrent users per district-level deployment.
+On-device BKT update and recommendation computed in under 200ms on Intel i3 / 4GB RAM class hardware.
+Offline quantized model response latency of 1–3 seconds on CPU-only devices, consistent with published results for comparable offline-LLM tutoring systems.
+6.2 Reliability and Availability
+99% availability for the cloud backend during connected windows.
+Zero data loss for offline quiz attempts and progress records across sync cycles, verified by checksum on merge.
+6.3 Security
+JWT authentication with short-lived access tokens and refresh rotation.
+Password hashing via BCrypt.
+Role-Based Access Control enforced at both API and tenant-scope level.
+AES-256 encryption at rest for offline IndexedDB data (student records, cached credentials).
+TLS for all network transport; Local Content Mesh channels authenticated via signed device tokens to prevent unauthorized content injection.
+6.4 Scalability
+Multi-tenant schema supports horizontal growth from one school to a full district without redesign.
+Content Mesh removes server bandwidth as the bottleneck for last-mile distribution.
+6.5 Usability and Accessibility
+Simple, low-literacy-friendly navigation with icon-first UI.
+WCAG 2.1 AA color contrast and screen-reader labeling for key flows.
+Text-to-speech playback for notes/quiz prompts to support low-literacy learners and parents.
+6.6 Maintainability
+Modular architecture separating content delivery, mesh sync, mastery engine, and AI layer as independently deployable/testable modules.
+Automated integration tests for offline/online transition and mesh-sync merge logic.
+6.7 Reliability Engineering and Fault Tolerance
+Reliability is treated as a first-class requirement rather than an afterthought, since the platform's entire premise depends on it working when things go wrong (no network, low battery, an old device, a half-finished sync).
+Write-ahead local queue: every quiz attempt, progress update, or content request is first written to an append-only local queue in IndexedDB before any network or mesh operation is attempted, so a crash or battery cut mid-sync cannot lose data.
+Idempotent sync API: every sync request carries a client-generated UUID; the backend deduplicates on this key, so a retried request after a dropped connection can never double-count a quiz attempt.
+Checksum-verified transfers: both cloud sync and Local Content Mesh transfers verify a SHA-256 checksum of each content package before marking it complete, protecting against corruption over unreliable local radio links.
+Automatic retry with backoff: failed sync or mesh-transfer attempts retry with exponential backoff rather than repeatedly hammering a weak connection.
+Graceful feature degradation ladder: if the cloud is unreachable, the system falls back to the Local Content Mesh; if no peer is reachable, it falls back to fully offline mode with cached content and the on-device AI model — the student is never shown a hard failure, only a reduced feature set.
+Health self-check: each device runs a lightweight periodic check of storage quota, last successful sync time, and mesh peer visibility, surfaced to the teacher/admin dashboard so problems are visible before they become data loss.
+6.8 Testing and Validation Strategy
+Unit tests for the BKT engine against known reference sequences (verifying mastery probabilities converge as expected for a given pattern of correct/incorrect responses).
+Integration tests that simulate offline-to-online transitions, forcing sync conflicts deliberately to verify the merge and versioning logic.
+Mesh-sync tests using two or more emulated/physical devices on a local network to confirm content propagates correctly without a cloud round-trip.
+Load testing of the backend API at target concurrency (500+ users) using a free tool such as Apache JMeter or k6 (open-source, zero cost).
+A small real-world pilot in one classroom before wider rollout, to validate assumptions about device variety, connectivity patterns, and mesh range under actual rural conditions.
+
+7. System Architecture
+7.1 Layered Overview
+Layer
+Technology
+Responsibility
+Presentation
+React.js + Material UI (PWA, Service Workers)
+UI, offline shell, install-as-app experience
+Local Intelligence
+On-device BKT engine + quantized fallback model (WebAssembly/ONNX runtime)
+Mastery tracking, offline recommendations and explanations
+Offline Storage
+IndexedDB via Dexie.js (AES-256 encrypted)
+Videos, notes, quiz attempts, mastery vectors, cached content packs
+Local Content Mesh
+WebRTC data channels over WiFi-Direct/local WiFi, BLE fallback
+Device-to-device content and result propagation without internet
+Backend API
+Spring Boot, Spring Security, JWT
+Business logic, authentication, tenant scoping, sync merge logic
+Cloud AI
+Gemini API (RAG over teacher-uploaded materials)
+Quiz generation, rich explanations when online
+Database
+PostgreSQL (multi-tenant schema)
+Users, courses, quizzes, mastery history, reports
+Media/Notifications
+Cloudinary free tier (files), Firebase FCM free tier (push), free-quota SMS API
+Media delivery and multi-channel alerts at zero recurring cost
+Analytics
+Chart.js
+Dashboards for student/teacher/parent/admin roles
+7.2 Data Flow Summary
+1. A teacher device syncs with the cloud whenever connectivity is available, pulling new content and pushing accumulated results.
+2. That device advertises newly available content over the Local Content Mesh; nearby student devices pull only missing deltas.
+3. Students interact with content fully offline; every graded response updates the on-device BKT mastery vector and queues a sync record.
+4. When any device in the cluster next reaches connectivity, queued records are pushed to the backend, merged with conflict resolution, and reflected in teacher/parent/admin dashboards.
+5. The AI Co-Pilot uses Gemini (online) or the local quantized model (offline) for generation tasks, always grounded by the current mastery vector and uploaded curriculum content.
+
+8. Software and Hardware Requirements
+8.1 Software
+Category
+Technology
+Cost
+Frontend
+React.js, Material UI, Redux Toolkit, Service Workers
+Free / open-source
+Offline Storage
+Dexie.js (IndexedDB), Web Crypto API
+Free / open-source
+Peer Sync
+WebRTC (browser-native), Web Bluetooth (fallback)
+Free / open-source
+Local AI
+ONNX Runtime Web or WebAssembly-compiled quantized open model (e.g. a distilled open-weight model)
+Free / open-source
+Backend
+Spring Boot, Spring Security, JWT, Maven
+Free / open-source
+Database
+PostgreSQL, hosted on a free-tier managed provider (Supabase, Neon, or Aiven free plan)
+Free within pilot-scale limits
+Hosting
+Render, Railway, or Vercel free tier; free .onrender.com/.vercel.app subdomain instead of a paid custom domain
+Free
+Cloud AI
+Gemini API free tier (sufficient for pilot-scale quiz generation and explanations)
+Free within tier quota
+Media/Notifications
+Cloudinary free tier, Firebase FCM (unlimited, free)
+Free within tier quota
+SMS Fallback
+A free-quota transactional SMS API (e.g., Fast2SMS free daily quota) used only as a last-resort channel
+Free within quota
+Analytics
+Chart.js
+Free / open-source
+Tooling
+VS Code, Postman, Git, GitHub (public/student repo), Figma (free plan)
+Free
+All components above are chosen specifically because they have a genuinely free tier or are open-source, so the project can be built, hosted, and pilot-tested with zero monetary investment. See Section 10 for how free-tier limits are managed as usage grows.
+8.2 Hardware
+Tier
+Processor
+RAM
+Storage
+Notes
+Minimum (student device)
+Intel i3 / equivalent ARM
+4 GB
+128 GB
+Runs UI, offline storage, mesh sync
+Recommended (teacher/sync device)
+Intel i5+ / recent mid-range phone
+8 GB+
+256 GB+
+Also runs local quantized AI model
+School network
+Standard WiFi router / mobile hotspot
+—
+—
+Supports Local Content Mesh; WAN uplink optional
+
+9. SDG Mapping
+SDG 4 — Quality Education: Ensures inclusive, uninterrupted access to curriculum-aligned content regardless of connectivity, with adaptive support for individual mastery gaps.
+SDG 9 — Industry, Innovation and Infrastructure: Introduces device-mesh content propagation and offline AI as reusable rural digital infrastructure, not a single-purpose app.
+SDG 10 — Reduced Inequalities: Extends reach to feature-phone parents via SMS/USSD and to low-spec/offline devices via the mesh and on-device AI, closing gaps left by smartphone- and internet-only designs.
+SDG 17 — Partnerships for the Goals: A multi-tenant School/Cluster/District model is designed for adoption by government education departments or NGOs, not just a single institution.
+
+10. Zero-Investment Deployment Architecture
+The entire system is designed so it can be built, hosted, and demonstrated for a final-year review — and piloted in a real school — without any team member spending money. This is achieved by design, not by omission: every paid-looking component in earlier drafts has a genuinely free equivalent that is sufficient at pilot scale.
+10.1 How Each Cost Item Is Eliminated
+Would-be cost
+Zero-cost alternative used instead
+Limit at pilot scale
+Paid cloud server
+Render / Railway free web-service tier
+Sleeps after inactivity; acceptable for demos and small pilots
+Managed database
+Supabase or Neon free PostgreSQL tier
+500MB–1GB storage, ample for a pilot cohort
+Custom domain
+Free subdomain from the hosting provider
+No custom branding, no functional loss
+Gemini API paid tier
+Gemini API free tier
+Daily/rate-limited requests; sufficient for classroom-scale AI Co-Pilot use
+SMS/USSD gateway
+Free-quota transactional SMS API used only as fallback, not the default channel
+Daily message cap; acceptable since SMS is a fallback, not primary channel
+Media/file storage
+Cloudinary free tier
+Storage/bandwidth cap; manageable by compressing video and capping upload size
+Push notifications
+Firebase Cloud Messaging
+Free, uncapped for this use case
+Load/testing tools
+Open-source k6 or JMeter run locally
+No cost at any scale
+Design tools
+Figma free plan
+Sufficient for a small team
+10.2 Growing Beyond Free Tiers
+If the project is adopted beyond the pilot (e.g., an NGO or education department wants a full district rollout), the same architecture scales by upgrading individual free tiers to their paid equivalents without any redesign — this is a deliberate advantage of choosing widely-used managed services over custom infrastructure. This is a decision for whoever funds a real rollout, not a requirement for completing or demonstrating the project.
+
+11. Recommended Build Order (Dependency-Based)
+Rather than a calendar schedule (which is unreliable to predict for a student project and depends on hours actually available each week), the build order below sequences modules strictly by technical dependency: each stage only requires what came before it, so the project always has something demonstrable, even if later stages take longer than expected.
+Stage 1 — Foundations: Multi-tenant PostgreSQL schema; Spring Boot project with JWT auth and RBAC; React PWA shell with routing and Service Worker registration. Nothing later can be built without this.
+Stage 2 — Offline Core: Dexie.js/IndexedDB schema; content download and offline playback; on-device quiz evaluation. This alone already delivers a working offline-first learning app.
+Stage 3 — Adaptive Engine: Bayesian Knowledge Tracing implementation over quiz results; on-device recommendation logic driven by the mastery vector. Depends only on Stage 2's quiz data existing locally.
+Stage 4 — Cloud Sync: Background sync manager, idempotent sync API, conflict resolution and versioning. Depends on Stage 1 (backend) and Stage 2 (local data to sync).
+Stage 5 — AI Co-Pilot: Gemini API integration for quiz generation and explanations, grounded by Stage 3's mastery data; add the on-device quantized fallback model once the cloud path is proven.
+Stage 6 — Local Content Mesh: WebRTC-based device-to-device propagation, built last since it depends on Stage 4's sync format already being stable — the mesh simply moves the same content packages peer-to-peer instead of via the cloud.
+Stage 7 — Reach Extensions: SMS fallback channel, multilingual UI, gamification layer, dashboards for teacher/parent/admin roles — these are additive and can be built in parallel once Stage 1–4 are stable.
+Stage 8 — Hardening and Pilot: Apply the testing strategy in Section 6.8, then run a small real-classroom pilot before final submission/demo.
+This ordering is the single most important reliability decision in the whole plan: it guarantees that whatever the team completes by review day is a coherent, working subset of the system, not a pile of half-finished, disconnected features.
+
+12. Risk Analysis and Mitigation
+Risk
+Impact
+Mitigation
+WebRTC/WiFi-Direct support varies across low-end Android devices
+Mesh sync fails on some devices
+BLE-based fallback protocol for content advertisement at reduced throughput
+Quantized offline model too large/slow for oldest devices
+AI fallback unusable on some hardware
+Tiered model sizes selected automatically based on device capability, per hardware-aware selection approaches in current offline-LLM research
+Free-tier request/message caps reached during a large pilot
+Some AI or SMS requests delayed until quota resets
+SMS used only as a fallback channel (not default); AI Co-Pilot requests queued and retried rather than failing; scale-up path to paid tiers documented in Section 10.2 if ever needed
+Free-tier server 'cold start' after inactivity
+First request after idle period is slow
+Lightweight scheduled keep-alive ping during demo/pilot windows; not a concern for offline-first student usage since the app works without hitting the server at all
+Conflict merges corrupt teacher-authored content
+Data integrity risk
+Teacher-authored content edits are versioned; conflicting edits are flagged for manual merge rather than auto-resolved
+Scope larger than a typical final-year build
+Incomplete delivery
+Follow the strict dependency order in Section 11: core offline PWA and BKT engine first, since every later module depends on them; mesh sync and SMS integration are additive and can be demonstrated as prototypes even if not fully hardened
+
+13. Future Enhancements
+Federated learning across schools to improve the mastery/recommendation model without centralizing raw student data.
+Voice-based navigation and tutoring in regional languages for low-literacy users.
+Solar-powered local sync kiosks for schools without any reliable power source.
+AR/VR learning modules for practical/lab subjects.
+Predictive dropout-risk analysis for administrators using longitudinal mastery and attendance trends.
+
+14. References
+[1] Raja, M. et al. (2026). Digital Learning Platform for Rural Schools. IJIRT, 12(11), 7353–7359. (Base Paper 1)
+[2] Naladkar, M. et al. (2026). Digital Learning Platform for Rural School Students. IJERT, 15(04). (Base Paper 2)
+[3] Ehiagwina, F. et al. PeerDrop: Implementation of a Mesh-Based Peer-to-Peer Network for Secure Offline Communication. International Journal of Research Publication and Reviews, 6(5), 8486–8495 (2025).
+[4] Lutfullayeva, D. et al. Low Bandwidth Wireless Mesh Networks for Rural Education with Cognitive Load Reduction and Persistence Gains. Journal of Wireless Mobile Networks, Ubiquitous Computing, and Dependable Applications, 16(4), 323–335 (2025).
+[5] Rural Connectivity: Opportunistic Connectivity for Challenged Communities to Access Digital Public Goods. Proceedings of the 13th International Conference on Networks, Communication and Computing (2024).
+[6] Walusimbi, J. et al. Offline-First LLM Architecture for Adaptive Learning in Low-Connectivity Environments. arXiv:2603.03339 (2026).
+[7] Corbett, A. T., & Anderson, J. R. Knowledge Tracing: Modeling the Acquisition of Procedural Knowledge. User Modeling and User-Adapted Interaction, 4(4), 253–278 (1994).
+[8] Emergent Mind. Bayesian Knowledge Tracing — foundational framework and recent extensions (2025).
+[9] Gaunt, M. & Russell, A. (2020). Progressive Web Apps: Book of Service Workers. Google Developers.
+[10] Dexie.js (2023). A Minimalist Wrapper for IndexedDB. https://dexie.org
+[11] Google DeepMind (2024). Gemini API: Developer Documentation and Guides.
+[12] Spring.io (2023). Spring Boot Reference Documentation. VMware.
+[13] PostgreSQL Global Development Group (2024). PostgreSQL 16 Documentation.
+[14] UNESCO (2022). Guidelines for ICT in Education and Teacher Development in Rural Areas.
+[15] Hrastinski, S. (2008). Asynchronous and Synchronous e-Learning. Educause Quarterly, 31(4), 51–55.
+[16] Mayer, R. E. (2009). Multimedia Learning (2nd ed.). Cambridge University Press.
