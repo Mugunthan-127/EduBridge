@@ -1,0 +1,682 @@
+--- UI Elements ---
+EDUBRIDGE
+UI Element and Behavior Specification
+Documents every element present in EduBridge_Prototype.jsx, section by section, and precisely how each one performs — what it shows, what triggers it, and what state changes as a result.
+
+1. Global App Shell
+Present on every screen regardless of which role is active. This is the persistent frame the five role views sit inside.
+1.1 Status strip (top bar)
+A dark, monospace-font strip fixed above all content. Its job is to make the offline-first architecture visible at all times, not just documented in text.
+Element
+Type
+Behavior — exactly how it performs
+Connectivity toggle
+Button
+Shows a Wi-Fi icon and "online"/"offline" label. Clicking flips a single online/offline flag for the whole app. Every other component (video pill, AI tutor tier, sync behavior) reads this same flag, so one click demonstrates the full offline-first behavior consistently across screens.
+Sync queue counter
+Live counter + icon
+Reads the length of an in-memory queue array that every write action (quiz submit, material upload, mesh advertise, review decision, package push) appends to. Shows a spinning icon while a sync is in progress. While offline and the queue is non-empty, appends "(retry in Ns)" using the current backoff value.
+Mesh peers counter
+Live counter + icon
+Displays the current simulated peer count. Starts at 2; increases by 3 whenever the teacher's "Advertise to mesh" action runs, modeling nearby devices picking up the advertised content.
+Last sync counter
+Live counter
+Ticks upward once per second showing seconds since the last successful sync, recalculated from a stored timestamp. Resets to 0 the moment a sync completes successfully.
+Sync now button
+Button
+Manually triggers the same flush logic that runs automatically when connectivity is restored. If online: after an 800ms simulated network delay, clears the queue, resets the backoff counter to 2s, and resets the last-sync timer. If offline: the queue is left untouched and the backoff counter doubles (2 to 4 to 8 to 16, capped at 32 seconds), modeling exponential backoff on repeated failures.
+1.2 Role switcher
+A row of five pill buttons directly under the header.
+Element
+Type
+Behavior — exactly how it performs
+Role pills
+Button group
+Exactly one of Student / Teacher / Parent / School admin / District is active at a time. The active pill is filled dark; inactive pills are outlined. Clicking a pill swaps the entire content area below to that role's view — each role's internal state (mastery, queue items already pushed, etc.) persists in memory even after switching away and back, since it is held in the top-level component, not remounted.
+
+2. Student Dashboard
+Two-column layout: a wider left column for learning activity, a narrower right column for progress and the AI tutor.
+2.1 Mastery map
+Element
+Type
+Behavior — exactly how it performs
+Per-topic progress bar
+Bar + % label
+One bar per topic (Fractions, Reflection of light, Linear equations). Width is literally the student's current BKT mastery probability for that topic, redrawn with a 0.5s CSS transition whenever it changes — so a correct quiz answer visibly grows the bar in real time.
+Recommended next
+Text line
+Computed by comparing all three mastery values and naming whichever topic currently has the lowest — recalculated on every render, so it updates immediately after a quiz changes any topic's mastery.
+2.2 Courses & content
+Element
+Type
+Behavior — exactly how it performs
+Topic row
+List item
+One row per topic: icon, topic name, parent course name.
+Delivery mode pill
+Pill
+Reads the global online/offline flag: shows "stream" when online, "downloaded" when offline — the same toggle in the status strip changes this label live on every topic row at once.
+Take quiz button
+Button
+Only rendered for topics that have a quiz defined (Fractions, in this build). Clicking opens the quiz card below and resets any previous answers/result for a fresh attempt.
+2.3 Quiz card (appears after "Take quiz")
+Element
+Type
+Behavior — exactly how it performs
+Question list
+List of 5 questions
+Each question shows its text and four selectable option buttons.
+Option button
+Button
+Clicking selects that option for the question (single selection per question); the selected option is highlighted with a teal border and fill. Selecting a different option for the same question replaces the previous choice.
+Submit button
+Button
+Disabled until every question has a selected answer. On click: grades all five answers on-device, runs each result through the BKT update formula in sequence against the topic's current mastery, awards 10 points per correct answer, unlocks the "Perfect score" badge if all five are correct and it hasn't been earned yet, and pushes a `quiz-attempt` item onto the global sync queue — all without any network call, online or offline.
+2.4 Quiz result card (appears after submit)
+Element
+Type
+Behavior — exactly how it performs
+Score display
+Large number
+Shows correct/total, e.g. "4/5".
+Before → after mastery
+Text + bar
+Shows the topic's mastery percentage immediately before this attempt and immediately after, side by side, with the mastery bar redrawn to the new value.
+Sync status pill
+Pill
+Always reads "synced to queue — will reach teacher on next connection", regardless of current online status, since the write-ahead queue behavior is identical either way — only the flush timing differs.
+Ask AI tutor button
+Button (conditional)
+Only appears if the score is below 75%. Clicking opens the AI Tutor panel in the right column, pre-contextualized with the quiz's topic and the student's current weakest topic.
+Back to courses button
+Button
+Clears the active quiz and result state, returning to the course list.
+2.5 Progress and leaderboard (right column)
+Element
+Type
+Behavior — exactly how it performs
+Points total
+Large number + icon
+Running total that increases by 10 for every correct quiz answer across all attempts this session.
+Badge pills
+Pill list
+Starts with "First quiz"; "Perfect score" is added the first time a quiz is fully correct. Badges never disappear once earned.
+Leaderboard rows
+Sorted list
+Three fixed sample classmates plus "You" (the live points total), re-sorted highest-to-lowest on every render — so earning points during the session can visibly move the student's own rank.
+2.6 AI tutor panel (conditional, opens from quiz result)
+Implements the four-tier degradation ladder as a live, testable behavior rather than a static description.
+Element
+Type
+Behavior — exactly how it performs
+Tier dot indicator
+4 small dots
+Exactly one dot is lit (colored) at a time — green (tier 1, online/cloud), amber (tier 2, retrying), blue (tier 3, offline cache hit), red (tier 4, offline keyword rules). The lit dot is recalculated only when the global online flag changes (not on every render), so it doesn't flicker.
+Tier label
+Text
+Plain-language description next to the dots matching the current lit tier, e.g. "offline — local keyword rules".
+Chat log
+Scrolling message list
+User messages right-aligned on a teal background, tutor replies left-aligned on the page background. Persists for the panel's lifetime.
+Message input + send
+Text field + button
+On send: appends the user's message immediately, shows a "thinking…" indicator, then after a 700ms simulated delay appends a reply whose content explicitly reflects the active tier (full explanation if tier 1/2, a cached match if tier 3, a keyword-matched FAQ line if tier 4) — so switching the global connectivity toggle mid-conversation visibly changes what kind of answer comes back next.
+
+3. Teacher Workspace
+3.1 Course manager
+Element
+Type
+Behavior — exactly how it performs
+Module tabs
+Button group
+One button per module (e.g. "Unit 1 — Fractions"); clicking switches which module's material list is shown below.
+Material list
+List
+Shows the active module's uploaded items (videos, notes, worksheets) as simple labeled rows.
+Add material input + Upload button
+Text field + button
+Typing a name and clicking Upload appends it to the active module's item list immediately and pushes a `course-material-upload` item onto the global sync queue, modeling FR3.1/FR4.1 content upload.
+3.2 Quiz authoring
+Element
+Type
+Behavior — exactly how it performs
+Existing question list
+List
+Shows every question authored so far with a pill marking its type (mcq or short-answer).
+Type selector
+Dropdown
+Chooses whether the next added question is Multiple choice or Short answer (flagged for review) — this determines which grading path the question would follow in the student evaluator.
+Question text input
+Text field
+Holds the manually-typed question text before adding.
+Add manually button
+Button
+Adds the typed question with the selected type to the list and pushes a `quiz-authored` sync item.
+Generate with AI button
+Button
+Ignores the text field and instead inserts a fixed sample AI-drafted question, modeling the AI Co-Pilot's retrieval-augmented generation output (FR5.2) without requiring a live API key in this demo build.
+3.3 Local content mesh
+Element
+Type
+Behavior — exactly how it performs
+Advertise to mesh button
+Button
+On click: disables itself and shows "Advertising…" for 4 seconds, increases the global mesh peer count by 3, and pushes a `mesh-advertise-session` sync item — modeling a teacher device advertising newly downloaded content to nearby student devices with zero internet required for the students to receive it (SRS Section 3.1).
+3.4 Mastery heatmap
+Element
+Type
+Behavior — exactly how it performs
+Heatmap grid
+Colored grid
+Rows are four sample students, columns are the three topics. Each cell's fill opacity is proportional to that student's mastery of that topic (darker teal = higher mastery), giving the "weak topic clusters" view described in FR7.2 at a glance, with the exact percentage available on hover.
+3.5 Pending review
+Element
+Type
+Behavior — exactly how it performs
+Flagged answer row
+List item
+Shows a student's free-text quiz answer that the evaluator could not honestly auto-grade.
+Approve / reject buttons
+Icon buttons
+Removes the row from the pending list either way and pushes a `review-approved:<id>` or `review-rejected:<id>` sync item, so the decision is recorded and queued for sync regardless of connectivity.
+
+4. Parent Portal
+4.1 Dashboard header
+Element
+Type
+Behavior — exactly how it performs
+Language buttons (EN / TA / HI)
+Button group
+Clicking a language immediately re-renders every translatable label on the page (dashboard title, "Attendance", "Marks & mastery", "Notifications") from a lookup dictionary — a live demonstration of FR10.1/FR10.2, not a static screenshot per language.
+Link child form
+Text field + button
+Shown when no child is linked yet; typing a student username and clicking "Link child" switches the portal into the linked state.
+Linked state display
+Text + unlink link
+Once linked, shows the linked username and an "(unlink)" action that returns to the link form — modeling that a parent can relink to a different child.
+4.2 Attendance and mastery charts
+Element
+Type
+Behavior — exactly how it performs
+Attendance bar chart
+Bar chart (Recharts)
+Seven bars, one per day of the last week, height 1 (present) or 0 (absent), with a tooltip on hover — matches FR7.3.
+Mastery trend line chart
+Line chart (Recharts)
+A smooth line showing the child's overall mastery percentage across the last 7 days, with a tooltip formatting the value as a percentage on hover.
+4.3 Notifications
+Element
+Type
+Behavior — exactly how it performs
+Push alerts / SMS gateway log toggle
+Button pair
+Switches the panel below between two views of the same underlying notification concept: a short confirmation that push is active, or a monospace log of simulated SMS messages — modeling the FR8.2/FR8.3 fallback channel for feature-phone households.
+SMS log entries
+Text list
+Fixed sample messages with timestamps, shown only when the SMS gateway log view is selected.
+
+5. School Administrator Portal
+5.1 User management
+Element
+Type
+Behavior — exactly how it performs
+User row
+List item
+Shows a name, role, and current status pill (Active / Pending / Disabled, colored accordingly).
+Status toggle button
+Icon button
+Flips a user between Active and Disabled on click (a UserCheck icon re-enables, a UserX icon disables) — models FR1.1/FR1.3 account management with an immediate visible state change, no confirmation dialog in this demo build.
+5.2 Diagnostics — device health
+Directly models the SRS 6.7 health self-check requirement.
+Element
+Type
+Behavior — exactly how it performs
+Device table
+Table
+One row per sample device: device ID, last user, battery percentage (shown in red if below 40%, otherwise green), storage used percentage, and current mesh peer count — all in monospace to read like a systems readout rather than a marketing table.
+Refresh button
+Button
+Regenerates all device rows with new randomized values, simulating a fresh health-check poll across the school's devices.
+5.3 Sync & mesh settings
+Element
+Type
+Behavior — exactly how it performs
+Sync check interval slider
+Slider (5–60 min)
+Live-updates a displayed value as it's dragged; represents how often each device checks for a sync opportunity.
+Max mesh peers slider
+Slider (5–50)
+Live-updates a displayed value; represents the cap on simultaneous peers a single device will serve during a mesh advertising session.
+5.4 School-wide mastery
+Element
+Type
+Behavior — exactly how it performs
+Grade-level bar chart
+Bar chart (Recharts)
+Aggregated average mastery per grade (6, 7, 8) across the whole school, giving the administrator a rollup view one level above the teacher's per-class heatmap.
+
+6. Cluster / District Portal
+6.1 Cluster tenant map
+Element
+Type
+Behavior — exactly how it performs
+Cluster row
+List item
+Shows a cluster name, the number of schools it contains, and a pill with its average mastery percentage — the top level of the School → Cluster → District hierarchy from FR11.1.
+6.2 Aggregated mastery chart
+Element
+Type
+Behavior — exactly how it performs
+Cluster bar chart
+Bar chart (Recharts)
+One bar per cluster showing average mastery, letting a district administrator spot underperforming clusters at a glance.
+6.3 Push curriculum package
+Element
+Type
+Behavior — exactly how it performs
+Package name input
+Text field
+Holds the name of the curriculum package to distribute.
+Target cluster dropdown
+Dropdown
+Selects which cluster receives the package.
+Push to schools button
+Button
+On click, adds a log line recording the package name and target cluster — modeling FR11.2, where the package is pushed once to the cluster and then reaches individual schools' devices via their own Local Content Mesh rather than a repeated central push to every device.
+Push log
+Text list
+Accumulates one line per push action, most recent first, in monospace.
+
+7. Implementation Notes and Honest Limitations
+• All state in this prototype lives in React component state (useState/useEffect) and resets on page reload. Claude.ai artifacts cannot use localStorage, sessionStorage, or IndexedDB, so this build intentionally simulates the offline storage layer rather than persisting it — the real Dexie/IndexedDB schema is implemented separately in the core code package (EduBridge_Core.zip).
+• The BKT mastery formula used in the Student dashboard is the identical algorithm to frontend/src/mastery/bktEngine.js in the core package, so behavior demonstrated here (mastery rising with correct answers, recommending the weakest topic) is not just illustrative — it is the same math, verified separately by that package's automated tests.
+• The AI tutor's four tiers are simulated with canned response text rather than live Gemini/local-model calls, so the connectivity-driven tier switching can be demonstrated without an API key; wiring real calls means replacing the two response-generation branches in the AITutor component.
+• The Local Content Mesh's "Advertise to mesh" action is a state-change simulation (peer count increment), not a real WebRTC/BroadcastChannel transfer; the actual transfer protocol, including checksum verification, is implemented and tested in frontend/src/mesh/contentMesh.js in the core package.
+• Multi-tenant scoping (a School Admin only seeing their own school, a District Admin seeing all schools in their district) is not enforced in this prototype — every role's data is shown unconditionally for demo purposes. Real tenant scoping is enforced server-side in the backend skeleton's data model.
+
+--- FR NFR ---
+EDUBRIDGE
+Complete Functional and Non-Functional Requirements
+The full requirement set for the core idea: an offline-first, mesh-synchronized, mastery-adaptive learning platform for rural school clusters. Every requirement below carries a priority and a measurable acceptance criterion or verification method, so completeness can be checked, not just claimed.
+Priority key: Must = required for a working demo · Should = required for a complete system · Could = enhancement if time permits
+
+Part A — Functional Requirements
+Organized by module, matching the system's actual architecture (SRS Sections 5 and 7). Each requirement is independently testable.
+Module 1 — User Management & Authentication
+ID
+Requirement
+Pri
+Acceptance criteria
+FR1.1
+Multi-role registration: Student, Teacher, Parent, School Admin, Cluster Admin, District Admin
+Must
+Duplicate usernames rejected; role is set at creation and requires an admin action to change
+FR1.2
+Secure login issuing a JWT on valid credentials
+Must
+Invalid credentials return a generic error (no confirmation of which field was wrong, preventing user enumeration)
+FR1.3
+Password security via BCrypt hashing with a minimum complexity policy
+Must
+Plaintext passwords are never stored or logged; weak passwords are rejected client- and server-side
+FR1.4
+Role-Based Access Control enforced on every API endpoint and tenant scope
+Must
+A request for data outside the caller's role/tenant returns 403, verified by an access-control test matrix covering all role x resource pairs
+FR1.5
+Short-lived access tokens with refresh rotation
+Should
+An expired access token is rejected and requires either a valid refresh token or full re-login
+FR1.6
+Account status management (Active / Pending / Disabled)
+Must
+A Disabled account cannot authenticate even with correct credentials; status change takes effect on the account's next login attempt
+Module 2 — Course & Content Management
+ID
+Requirement
+Pri
+Acceptance criteria
+FR2.1
+Teachers create courses with topics mapped to curriculum tags
+Must
+A created course is immediately visible to students in the same school for enrollment
+FR2.2
+Students enroll in courses available to their school
+Must
+Duplicate enrollment in the same course is prevented; enrollment list updates instantly in the student's UI
+FR2.3
+Teachers upload materials: PDF, PPT, notes, images, tagged by topic
+Must
+Uploaded files are validated for type and size before being accepted; each is associated with exactly one topic
+FR2.4
+Content versioning on re-upload
+Should
+Re-uploading a material increments its version; devices holding an older cached copy are marked stale on next manifest check
+FR2.5
+Content edit and removal by the authoring teacher
+Should
+Removal is reflected in the manifest and propagates to devices on their next cloud or mesh sync
+Module 3 — Offline Storage & Local Content Mesh
+ID
+Requirement
+Pri
+Acceptance criteria
+FR3.1
+All content, quizzes, attempts, and mastery vectors persist in IndexedDB, encrypted at rest (AES-256)
+Must
+Killing the browser/device and reopening it offline still shows all previously downloaded content and prior results
+FR3.2
+A freshly-synced device advertises its content manifest over the Local Content Mesh (WebRTC/BLE)
+Must
+A manifest broadcast is observable on the local network within 2 seconds of a successful cloud sync
+FR3.3
+Nearby devices discover an advertiser and pull only missing content deltas
+Must
+A peer with partial content receives exactly the missing items, verified against the diff between its known-ID set and the hub's manifest
+FR3.4
+Every mesh and cloud transfer is checksum-verified (SHA-256) before being committed to local storage
+Must
+A deliberately corrupted payload is rejected and not written to IndexedDB
+FR3.5
+Locally queued changes sync automatically in the background on reconnect
+Must
+Reconnecting after any offline period drains the entire local queue without user action, observable in the sync queue counter reaching zero
+FR3.6
+Conflicting offline edits are resolved by last-write-wins for student data and flagged for manual merge for teacher-authored content
+Should
+Two conflicting teacher edits to the same material produce a flagged conflict record rather than silently overwriting one
+FR3.7
+Sync requests are idempotent via a client-generated UUID
+Must
+Submitting the same sync payload twice (simulating a dropped connection retry) results in exactly one stored record, not two
+Module 4 — Video Learning
+ID
+Requirement
+Pri
+Acceptance criteria
+FR4.1
+Teachers upload videos, transcoded server-side to multiple bitrates
+Must
+An uploaded video becomes available in at least two quality tiers within a defined processing window
+FR4.2
+Adaptive bitrate streaming selected from measured network conditions
+Should
+Simulated bandwidth drop during playback triggers a lower-bitrate stream without playback stopping
+FR4.3
+Downloaded videos play fully offline
+Must
+A downloaded video plays start-to-finish with the device in airplane mode
+Module 5 — Quiz, Assessment & AI Co-Pilot
+ID
+Requirement
+Pri
+Acceptance criteria
+FR5.1
+Teachers manually author quizzes with objective and short-answer items
+Must
+A newly authored quiz is immediately assignable to a course
+FR5.2
+AI Co-Pilot drafts quiz questions from a teacher's uploaded material using retrieval-augmented generation
+Should
+Generated questions reference content actually present in the source material, not generic unrelated content
+FR5.3
+Objective questions (single-choice, multi-choice, numeric, short-text) are auto-graded entirely on-device, online or offline
+Must
+Grading completes with no network call and matches a hand-computed expected result across all supported question types
+FR5.4
+Free-text questions are honestly excluded from auto-grading and queued for teacher review
+Must
+A free-text response never receives an automatic correct/incorrect verdict; it always appears in the teacher's pending-review list
+FR5.5
+Scores are available instantly after submission
+Must
+Time from submit click to score display is under 100ms on reference hardware, online or offline
+FR5.6
+Teachers approve or reject flagged free-text responses
+Must
+A review decision removes the item from the pending list and is queued for sync
+Module 6 — Adaptive Mastery Engine
+ID
+Requirement
+Pri
+Acceptance criteria
+FR6.1
+A four-parameter Bayesian Knowledge Tracing model tracks per-student, per-topic mastery on-device
+Must
+Mastery probability strictly increases over a run of consistent correct answers and stays low over a run of consistent incorrect answers, verified by automated test
+FR6.2
+The recommendation engine selects the next topic from the current mastery vector with no network call
+Must
+Given two topics of differing mastery, the lower-mastery topic is always recommended first
+FR6.3
+Weak-topic explanations are generated by the cloud LLM when online and a local quantized model when offline
+Should
+Toggling connectivity off mid-session changes the explanation source without an error being shown to the student
+FR6.4
+A compact mastery snapshot is exportable to ground LLM prompts and analytics views
+Should
+The snapshot contains every requested topic's current mastery and attempt count in a stable, documented format
+Module 7 — Analytics Dashboards
+ID
+Requirement
+Pri
+Acceptance criteria
+FR7.1
+Students view marks, attendance, course completion, and their mastery map
+Must
+All four data points are visible on a single screen without navigation
+FR7.2
+Teachers view a class-wide mastery heatmap and weak-topic clustering
+Must
+A student with below-average mastery on a topic is visually distinguishable from the class average
+FR7.3
+Parents view attendance, marks, and activity summaries for their linked child
+Must
+A parent cannot view any data for a student they are not linked to
+FR7.4
+Cluster/District admins view aggregated analytics across every school in scope
+Should
+Aggregation figures match the sum/average of the underlying per-school figures at all times
+Module 8 — Notifications
+ID
+Requirement
+Pri
+Acceptance criteria
+FR8.1
+In-app and push alerts for assignments, quizzes, and results
+Must
+A push-capable device receives a notification within a defined delay of the triggering event while online
+FR8.2
+SMS fallback channel for attendance/mark alerts to feature-phone parents
+Should
+A parent with no detected app/web session within a configurable window receives the same alert content via SMS instead
+FR8.3
+Fallback trigger logic decides the channel automatically per parent
+Should
+The same event never sends both a push notification and an SMS to the same parent for the same occurrence
+Module 9 — Gamification
+ID
+Requirement
+Pri
+Acceptance criteria
+FR9.1
+Students earn badges for milestones
+Should
+A defined milestone (e.g., first perfect quiz score) awards its badge exactly once
+FR9.2
+Class and school leaderboards ranked by mastery gained, not raw online activity
+Should
+A student who improves mastery while mostly offline can still rank above one who is online more but improves less
+FR9.3
+Achievement/progress milestone tracking
+Could
+Milestones persist across sessions and are visible on the student dashboard
+Module 10 — Multilingual Support
+ID
+Requirement
+Pri
+Acceptance criteria
+FR10.1
+English and Tamil supported at launch, with an extensible translation-resource structure for more languages
+Must
+Every user-facing label used in the primary flows has a translated string in both languages with no fallback to a raw translation key
+FR10.2
+Users switch language at any time without losing session state
+Must
+Switching language mid-session preserves the current screen, form inputs, and login state
+Module 11 — Multi-Tenant Administration
+ID
+Requirement
+Pri
+Acceptance criteria
+FR11.1
+School → Cluster → District tenant hierarchy with row-level data isolation
+Must
+A School Admin's queries never return another school's data, verified by an access-control test per tenant level
+FR11.2
+Cluster/District admins push curated content packages to schools, which further propagate via each school's Local Content Mesh
+Should
+A pushed package reaches a school's central sync record and is then observable propagating to that school's devices via mesh advertisement
+FR11.3
+Aggregated reporting is correctly scoped by the viewer's tenant level
+Must
+A Cluster Admin sees only their cluster's schools; a District Admin sees all clusters within their district
+
+Part B — Non-Functional Requirements
+Every non-functional requirement below has a measurable target and a stated verification method — the two things that turn a vague quality goal ("should be fast", "should be secure") into something that can actually be checked before submission or deployment.
+B.1 Performance
+Requirement
+Target metric
+Verification method
+Backend API response time
+< 3 seconds for 95% of requests under normal load
+Load testing with k6 or JMeter (open-source, zero cost)
+Concurrent user support
+500+ concurrent users per district-level deployment
+Load testing at target concurrency
+On-device BKT mastery update
+< 200ms on Intel i3 / 4GB RAM class hardware
+Profiling on reference low-spec hardware
+On-device objective quiz grading
+< 100ms from submit to score display, online or offline
+Manual and automated timing tests
+Offline quantized AI model response
+1–3 seconds on CPU-only devices
+Benchmark on reference hardware, consistent with published offline-LLM tutoring results
+B.2 Reliability & Fault Tolerance
+Requirement
+Target metric
+Verification method
+Backend availability during connected windows
+99% uptime
+Uptime monitoring over the pilot period
+Data loss for offline quiz attempts across sync cycles
+Zero data loss
+Checksum-verified merge testing across forced offline/online transitions
+Idempotent sync under retry
+No duplicate records after a retried request
+Replay the same sync payload N times; verify exactly one stored record
+Graceful degradation under network loss
+No hard failure ever shown to the student for AI or content requests
+Simulated network-kill testing at every stage of a learning session
+Write-ahead local queue
+No data loss on app crash or battery cut mid-sync
+Kill the app process mid-sync and verify the queued item persists and later syncs
+B.3 Security
+Requirement
+Target metric
+Verification method
+Session tokens
+Short-lived JWT with refresh rotation
+Security code review; token expiry test
+Password storage
+BCrypt hashing, cost factor ≥ 10
+Code review; no plaintext password ever appears in logs or database
+Offline data at rest
+AES-256 encryption of IndexedDB content
+Code review; inspect stored data directly to confirm it is not human-readable
+Access control
+RBAC enforced at API and tenant scope for every endpoint
+Access-control test matrix covering every role × resource combination
+Network transport
+TLS on all client-server traffic
+Configuration audit
+Local Content Mesh authentication
+Transfers authenticated via signed device tokens to prevent unauthorized content injection
+Protocol review; attempt an unsigned injection in a test environment and confirm rejection
+B.4 Scalability
+Requirement
+Target metric
+Verification method
+Tenant model growth
+Scales from one school to a full district without schema redesign
+Schema and migration review
+Last-mile bandwidth
+Mesh sync removes the server as the bottleneck for distributing content to a full classroom
+Architecture review; measure server bandwidth used per classroom sync event
+B.5 Usability & Accessibility
+Requirement
+Target metric
+Verification method
+Visual accessibility
+WCAG 2.1 AA color contrast on all primary flows
+Automated accessibility audit tool + manual spot check
+Screen reader support
+Primary actions correctly labeled
+Manual test with a screen reader on key flows
+Low-literacy navigation
+Icon-first navigation understandable without reading fluency
+Usability test with representative target users
+Read-aloud support
+Text-to-speech available for notes and quiz prompts
+Functional test of the TTS toggle on representative content
+B.6 Maintainability
+Requirement
+Target metric
+Verification method
+Module separation
+Content, mesh, mastery, and AI layers independently deployable and testable
+Architecture review
+Automated test coverage
+Unit tests for the BKT engine, quiz evaluator, sync manager, and mesh protocol; integration tests for offline/online transitions
+CI test suite run on every change (see the *.test.js files in the core implementation package)
+B.7 Portability & Compatibility
+Requirement
+Target metric
+Verification method
+Browser support
+Any evergreen browser (Chrome, Firefox, Edge, Safari) supporting Service Workers, IndexedDB, and WebRTC data channels
+Cross-browser test matrix
+Hardware support
+Fully functional on Intel i3 / 4GB RAM class devices already found in rural labs
+Benchmark on reference low-spec hardware
+B.8 Offline Availability
+Requirement
+Target metric
+Verification method
+Core learning flows offline
+Browse, download, watch, quiz, and view results fully usable with zero connectivity
+Functional test with the device in airplane mode
+AI assistance offline
+Degrades to a local model rather than becoming unavailable
+Functional test with connectivity disabled mid-session
+B.9 Data Privacy
+Requirement
+Target metric
+Verification method
+Data minimization
+Only data necessary for learning and progress tracking is collected
+Data model review
+Parent consent capture
+Consent recorded at parent/student registration
+Registration flow review
+On-device data control
+Student data does not leave the device until an explicit sync event
+Architecture review; network trace during offline use should show zero outbound traffic
+B.10 Economic / Deployment Constraint
+Requirement
+Target metric
+Verification method
+Zero-investment operability
+The entire stack (hosting, database, AI, notifications, media, tooling) runs on free tiers at pilot scale
+Deployment audit against the zero-investment architecture (SRS Section 10); confirm no paid plan is required to reach a working pilot deployment

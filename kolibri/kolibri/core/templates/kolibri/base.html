@@ -1,0 +1,93 @@
+{% load i18n core_tags webpack_tags content_tags cache %}
+{% load static %}
+{% get_current_language_bidi as LANGUAGE_BIDI %}
+{% get_current_language as LANGUAGE_CODE %}
+<!DOCTYPE html>
+<html dir="{{ LANGUAGE_BIDI|yesno:'rtl,ltr' }}" lang="{{ LANGUAGE_CODE }}">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=Edge,chrome=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="google" content="notranslate">
+  {% theme_favicon %}
+  <title>{% site_title %}</title>
+  {% frontend_base_head_markup %}
+</head>
+<body>
+<rootvue>
+  <style>
+    .container{
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      left: 0;
+    }
+
+    .rel{
+      position: relative;
+      width: 100%;
+      height: 100%;
+    }
+
+    .flapping-kolibri {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+    }
+  </style>
+  <div class="container">
+    <div class="rel">
+      {% include "kolibri/loading_snippet.html" %}
+    </div>
+  </div>
+</rootvue>
+{% block frontend_assets %}
+{% content_renderer_assets %}
+{% webpack_asset 'kolibri.core.default_frontend' %}
+{% frontend_base_assets %}
+{% endblock %}
+
+{% block content %}
+
+{% endblock %}
+
+<!-- EduBridge Gamification Widget -->
+<div id="edubridge-gamification-widget" style="display: none; position: fixed; bottom: 20px; left: 20px; width: 300px; background: white; border: 1px solid #ccc; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); z-index: 99999; flex-direction: column; overflow: hidden; font-family: sans-serif;">
+  <div id="edubridge-gamification-header" style="background: #2E8540; color: white; padding: 10px; font-weight: bold; cursor: pointer;">
+    EduBridge Gamification Leaderboard
+  </div>
+  <div id="edubridge-gamification-body" style="display: none; flex-direction: column; padding: 10px; height: 250px; overflow-y: auto;">
+    <h4 style="margin: 0 0 10px 0;">Cluster Leaderboard</h4>
+    <ul style="list-style: none; padding: 0; margin: 0; font-size: 14px;">
+      <li style="padding: 5px 0; border-bottom: 1px solid #eee;"><strong>1. Sri Krishna School</strong> - 15,200 pts</li>
+      <li style="padding: 5px 0; border-bottom: 1px solid #eee;"><strong>2. Coimbatore High</strong> - 12,450 pts</li>
+      <li style="padding: 5px 0; border-bottom: 1px solid #eee;"><strong>3. Rural Academy</strong> - 9,800 pts</li>
+    </ul>
+    <h4 style="margin: 15px 0 10px 0;">Your Badges</h4>
+    <div style="display: flex; gap: 10px;">
+      <div style="background: gold; padding: 5px 10px; border-radius: 12px; font-size: 12px; font-weight: bold;">7-Day Streak</div>
+      <div style="background: silver; padding: 5px 10px; border-radius: 12px; font-size: 12px; font-weight: bold;">Math Whiz</div>
+    </div>
+  </div>
+</div>
+
+<!-- EduBridge AI Co-Pilot Widget -->
+<div id="edubridge-ai-widget" style="display: none; position: fixed; bottom: 20px; right: 20px; width: 300px; background: white; border: 1px solid #ccc; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); z-index: 99999; flex-direction: column; overflow: hidden; font-family: sans-serif;">
+  <div id="edubridge-ai-header" style="background: #4368F5; color: white; padding: 10px; font-weight: bold; cursor: pointer;">
+    EduBridge AI Co-Pilot
+  </div>
+  <div id="edubridge-ai-body" style="display: none; flex-direction: column; height: 350px;">
+    <div id="edubridge-ai-messages" style="flex: 1; padding: 10px; overflow-y: auto; font-size: 14px; background: #f9f9f9;">
+      <div><strong>AI:</strong> How can I help you learn today?</div>
+    </div>
+    <div style="display: flex; border-top: 1px solid #eee;">
+      <input type="text" id="edubridge-ai-input" style="flex: 1; padding: 10px; border: none; outline: none;" placeholder="Ask something...">
+      <button id="edubridge-ai-send-btn" style="padding: 10px; border: none; background: #eee; cursor: pointer;">Send</button>
+    </div>
+  </div>
+</div>
+<script src="{% static 'assets/default_theme/edubridge_custom.js' %}"></script>
+</body>
+</html>

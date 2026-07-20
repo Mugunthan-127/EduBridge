@@ -1,0 +1,49 @@
+name: Docs
+on:
+  push:
+    branches:
+      - develop
+      - 'release-v**'
+  pull_request:
+    branches:
+      - develop
+      - 'release-v**'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  pre_job:
+    name: Path match check
+    runs-on: ubuntu-latest
+    # Map a step output to a job output
+    outputs:
+      should_skip: ${{ steps.skip_check.outputs.should_skip }}
+    steps:
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@master
+        with:
+          github_token: ${{ github.token }}
+          paths: '["docs/**", "pyproject.toml", "uv.lock", ".github/workflows/check_docs.yml", "*.md"]'
+  docs:
+    name: Checking docs build
+    needs: pre_job
+    if: ${{ needs.pre_job.outputs.should_skip != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-python: true
+          # Pin to match the Python RTD builds docs with (.readthedocs.yaml)
+          python-version: "3.11"
+      - name: Install dependencies
+        run: uv sync --group docs
+      - name: Check Docs build
+        run: make docs

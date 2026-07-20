@@ -1,0 +1,91 @@
+{% load static %}
+<style>
+  .flapping-kolibri {
+    animation: fadeIn;
+    animation-duration: 1s;
+    animation-delay: 1s;
+    animation-fill-mode: both;
+  }
+
+  .wing-inner {
+    animation: flapInner 2s 1.2s both infinite;
+  }
+
+  .wing-middle {
+    animation: flapMiddle 2s 1.2s both infinite;
+  }
+
+  .wing-outer {
+    animation: flapOuter 2s 1.2s both infinite;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0
+    }
+
+    to {
+      opacity: 1
+    }
+  }
+
+  @keyframes flapInner {
+    0% {
+      opacity: 0;
+    }
+
+    10% {
+      opacity: 1;
+    }
+
+    30% {
+      opacity: 1;
+    }
+
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes flapMiddle {
+    0% {
+      opacity: 0;
+    }
+
+    20% {
+      opacity: 0;
+    }
+
+    40% {
+      opacity: 1;
+    }
+
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes flapOuter {
+    0% {
+      opacity: 0;
+    }
+
+    40% {
+      opacity: 0;
+    }
+
+    50% {
+      opacity: 1;
+    }
+
+    100% {
+      opacity: 0;
+    }
+  }
+</style>
+
+
+<div class="flapping-kolibri" style="text-align: center;">
+  <img src="{% static 'assets/default_theme/edubridge_logo.png' %}" alt="Loading EduBridge..." width="150" height="150" style="border-radius: 50%; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+  <div style="margin-top: 15px; font-family: sans-serif; font-size: 18px; color: #1a51ff; font-weight: bold;">EduBridge is loading...</div>
+</div>

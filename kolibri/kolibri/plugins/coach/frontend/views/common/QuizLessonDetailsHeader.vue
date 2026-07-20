@@ -1,0 +1,176 @@
+<template>
+
+  <KPageContainer style="padding-top: 24px">
+    <BackLink
+      :to="backlink"
+      :text="backlinkLabel"
+    />
+
+    <!-- Cheating to get the same layout effect but not
+           using a backlink...
+      -->
+    <div class="header">
+      <div>
+        <h1 class="exam-title">
+          <!-- KLabeledIcon does not have an 'exam' token, but rather 'quiz' -->
+          <KLabeledIcon
+            :icon="icon"
+            :label="resource.title"
+          />
+        </h1>
+      </div>
+      <div
+        v-if="!$isPrint"
+        class="options"
+      >
+        <slot name="dropdown"></slot>
+      </div>
+    </div>
+    <MissingResourceAlert v-if="hasChannels && resource.missing_resource && !loading" />
+    <NoResourceAlert v-if="!hasChannels && !loading" />
+    <UiAlert
+      v-if="isFromOldKolibri && showAlert"
+      type="warning"
+      class="old-kolibri-banner"
+      @dismiss="showAlert = false"
+    >
+      <span>
+        {{ warningForQuizFromOldKolibri$() }}
+      </span>
+    </UiAlert>
+  </KPageContainer>
+
+</template>
+
+
+<script>
+
+  import { mapState } from 'vuex';
+  import UiAlert from 'kolibri-design-system/lib/keen/UiAlert';
+  import MissingResourceAlert from 'kolibri-common/components/MissingResourceAlert';
+  import NoResourceAlert from 'kolibri-common/components/NoResourceAlert.vue';
+  import { searchAndFilterStrings } from 'kolibri-common/strings/searchAndFilterStrings';
+  import useChannels from 'kolibri-common/composables/useChannels';
+  import BackLink from './BackLink';
+
+  export default {
+    name: 'QuizLessonDetailsHeader',
+    components: {
+      MissingResourceAlert,
+      BackLink,
+      UiAlert,
+      NoResourceAlert,
+    },
+    setup() {
+      const { fetchChannels } = useChannels();
+      const { warningForQuizFromOldKolibri$ } = searchAndFilterStrings;
+      return {
+        fetchChannels,
+
+        warningForQuizFromOldKolibri$,
+      };
+    },
+    props: {
+      backlink: {
+        type: Object,
+        required: true,
+      },
+      backlinkLabel: {
+        type: String,
+        required: true,
+      },
+      examOrLesson: {
+        type: String,
+        required: true,
+        validator(value) {
+          return ['exam', 'lesson'].includes(value);
+        },
+      },
+    },
+    data() {
+      return {
+        showAlert: true,
+        channels: [],
+        loading: false,
+      };
+    },
+    computed: {
+      ...mapState('classSummary', ['examMap', 'lessonMap']),
+      exam() {
+        return this.examMap[this.$route.params.quizId] || {};
+      },
+      lesson() {
+        return this.lessonMap[this.$route.params.lessonId] || {};
+      },
+      resource() {
+        return this.isExam ? this.exam : this.lesson;
+      },
+      isActive() {
+        return this.exam.active;
+      },
+      isExamDraft() {
+        return this.exam.draft;
+      },
+      isExamOldVersion() {
+        return this.exam.data_model_version < 3;
+      },
+      isFromOldKolibri() {
+        return this.isExamOldVersion && !this.isExamDraft && !this.isActive;
+      },
+      hasChannels() {
+        return this.channels.length > 0;
+      },
+      isExam() {
+        return this.examOrLesson === 'exam';
+      },
+      icon() {
+        return this.isExam ? 'quiz' : 'lesson';
+      },
+    },
+    async mounted() {
+      await this.loadChannels();
+    },
+    methods: {
+      async loadChannels() {
+        this.loading = true;
+        try {
+          const params = this.isExam ? { contains_exercise: true } : {};
+          this.channels = await this.fetchChannels(params);
+        } finally {
+          this.loading = false;
+        }
+      },
+    },
+  };
+
+</script>
+
+
+<style lang="scss" scoped>
+
+  .exam-title {
+    margin-top: 0;
+    margin-bottom: 0;
+  }
+
+  .header {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 16px;
+  }
+
+  .options {
+    flex-shrink: 0;
+  }
+
+  /deep/ .time-context {
+    margin-bottom: 0;
+  }
+
+  .old-kolibri-banner {
+    margin-top: 0.5em;
+  }
+
+</style>

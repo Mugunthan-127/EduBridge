@@ -1,0 +1,73 @@
+import ClassroomResource from 'kolibri-common/apiResources/ClassroomResource';
+import MembershipResource from 'kolibri-common/apiResources/MembershipResource';
+import RoleResource from 'kolibri-common/apiResources/RoleResource';
+import { handleApiError } from 'kolibri/utils/appError';
+
+export function removeClassLearner(store, { classId, userId }) {
+  if (!classId || !userId) {
+    // if no id passed, abort the function
+    return;
+  }
+  // fetch the membership model with this classId and userId.
+  return MembershipResource.deleteCollection({
+    user: userId,
+    collection: classId,
+  }).then(
+    () => {
+      store.commit('DELETE_CLASS_LEARNER', userId);
+      store.dispatch('displayModal', false);
+    },
+    error => {
+      handleApiError({ error });
+    },
+  );
+}
+
+export function removeClassCoach(store, { classId, userId }) {
+  // TODO class id should be accessible from state.
+  if (!classId || !userId) {
+    // if no id passed, abort the function
+    return;
+  }
+  // TODO use a getModel with role id? should be available. Might have to undo mappers
+  // fetch the membership model with this classId and userId.
+  return RoleResource.deleteCollection({
+    user: userId,
+    collection: classId,
+  }).then(
+    () => {
+      store.commit('DELETE_CLASS_COACH', userId);
+      store.dispatch('displayModal', false);
+    },
+    error => {
+      handleApiError({ error });
+    },
+  );
+}
+
+/**
+ * Updates a class with the given data and commits the change to the store.
+ * @param {object} store - The Vuex store instance.
+ * @param {object} payload - Payload object.
+ * @param {string} payload.id - The ID of the class to update.
+ * @param {object} payload.updateData - The data to update on the class.
+ * @returns {Promise<void>|void} Resolves when the class has been updated.
+ */
+export function updateClass(store, { id, updateData }) {
+  if (!id || Object.keys(updateData).length === 0) {
+    // if no id or empty updateData passed, abort the function
+    return;
+  }
+  return ClassroomResource.saveModel({
+    id,
+    data: updateData,
+  }).then(
+    updatedClass => {
+      store.commit('UPDATE_CLASS', { id, updatedClass });
+      store.dispatch('displayModal', false);
+    },
+    error => {
+      handleApiError({ error });
+    },
+  );
+}

@@ -1,0 +1,95 @@
+<template>
+
+  <CoachAppBarPage
+    :loading="pageLoading"
+    :appBarTitle="coreString('coachLabel')"
+    :pageTitle="coreString('allFacilitiesLabel')"
+  >
+    <KPageContainer>
+      <h1>{{ coreString('facilitiesLabel') }}</h1>
+      <CoreTable>
+        <template #headers>
+          <th>{{ coreString('nameLabel') }}</th>
+          <th>{{ coreString('classesLabel') }}</th>
+        </template>
+        <template #tbody>
+          <tbody>
+            <tr
+              v-for="facility in facilities"
+              :key="facility.id"
+            >
+              <td>
+                <KRouterLink
+                  :text="facility.name"
+                  :to="coachClassListPageLink(facility)"
+                  icon="facility"
+                />
+              </td>
+              <td>
+                {{ $formatNumber(facility.num_classrooms) }}
+              </td>
+            </tr>
+          </tbody>
+        </template>
+      </CoreTable>
+    </KPageContainer>
+  </CoachAppBarPage>
+
+</template>
+
+
+<script>
+
+  import CoreTable from 'kolibri/components/CoreTable';
+  import commonCoreStrings from 'kolibri/uiText/commonCoreStrings';
+  import useUser from 'kolibri/composables/useUser';
+  import useFacilities from 'kolibri-common/composables/useFacilities';
+  import { pageLoading } from 'kolibri-common/composables/usePageLoading';
+  import commonCoach from './common';
+  import CoachAppBarPage from './CoachAppBarPage';
+
+  export default {
+    name: 'AllFacilitiesPage',
+    components: {
+      CoachAppBarPage,
+      CoreTable,
+    },
+    mixins: [commonCoach, commonCoreStrings],
+    setup() {
+      const { userFacilityId } = useUser();
+      const { facilities, userIsMultiFacilityAdmin } = useFacilities();
+      return { pageLoading, userFacilityId, userIsMultiFacilityAdmin, facilities };
+    },
+    props: {
+      subtopicName: {
+        type: String,
+        required: false,
+        default: null,
+      },
+    },
+    beforeMount() {
+      if (!this.userIsMultiFacilityAdmin) {
+        const singleFacility = { id: this.userFacilityId };
+        this.$router.replace(this.coachClassListPageLink(singleFacility));
+      }
+    },
+    methods: {
+      coachClassListPageLink(facility) {
+        const params = {};
+        if (facility) {
+          params.facility_id = facility.id;
+        }
+        params.subtopicName = this.subtopicName;
+
+        return {
+          name: 'CoachClassListPage',
+          params,
+        };
+      },
+    },
+  };
+
+</script>
+
+
+<style lang="scss" scoped></style>

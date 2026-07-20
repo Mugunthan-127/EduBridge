@@ -1,0 +1,17 @@
+# Run this command to always ignore formatting commits in `git blame`
+# git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# Applied black to the codebase
+7dadc107cebd3ab4597f1aa4f159940872466dec
+
+# Reformatted all frontend code using prettier v3
+42efde27bac137734f05057278c4827168d119f2
+
+# Migrated all frontend code from assets/src to frontend
+e59c54a53fe4305700d4ced05134ab95b7436b1e
+
+# Ruff and yamlfmt reformatting
+301b08fd04c464ca3b11b5b12a001db83c364b03
+
+# Reformatted imports after enabling ruff isort rules
+51b7e61d74714aed5d82555114066fb5cc4b814e

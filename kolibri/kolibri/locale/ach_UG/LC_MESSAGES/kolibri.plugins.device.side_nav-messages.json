@@ -1,0 +1,17 @@
+{
+  "CommonDeviceStrings.deviceManagementTitle": "crwdns391443:0crwdne391443:0",
+  "CommonDeviceStrings.emptyTasksMessage": "crwdns391445:0crwdne391445:0",
+  "CommonDeviceStrings.newChannelLabel": "crwdns391447:0crwdne391447:0",
+  "CommonDeviceStrings.newEnabledPluginsState": "crwdns391449:0crwdne391449:0",
+  "CommonDeviceStrings.newResourceLabel": "crwdns391451:0crwdne391451:0",
+  "CommonDeviceStrings.notEnoughSpaceForChannelsWarning": "crwdns391453:0crwdne391453:0",
+  "CommonDeviceStrings.permissionsLabel": "crwdns391455:0crwdne391455:0",
+  "CommonDeviceStrings.primaryStorageLabel": "crwdns391457:0crwdne391457:0",
+  "CommonDeviceStrings.statusCanceled": "crwdns391459:0crwdne391459:0",
+  "CommonDeviceStrings.statusCanceling": "crwdns391461:0crwdne391461:0",
+  "CommonDeviceStrings.statusComplete": "crwdns391463:0crwdne391463:0",
+  "CommonDeviceStrings.statusFailed": "crwdns391465:0crwdne391465:0",
+  "CommonDeviceStrings.statusInProgress": "crwdns391467:0crwdne391467:0",
+  "CommonDeviceStrings.statusInQueue": "crwdns391469:0crwdne391469:0",
+  "CommonDeviceStrings.unlistedChannelLabel": "crwdns391471:0crwdne391471:0"
+}

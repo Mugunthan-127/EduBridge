@@ -1,0 +1,414 @@
+"""
+A file to contain specific logic to handle version upgrades in Kolibri.
+"""
+
+import logging
+import os
+
+from le_utils.constants import content_kinds
+from le_utils.constants import library as library_constants
+from sqlalchemy import and_
+from sqlalchemy import cast
+from sqlalchemy import exists
+from sqlalchemy import func
+from sqlalchemy import Integer
+from sqlalchemy import select
+from sqlalchemy.exc import DatabaseError
+
+from kolibri.core.auth.models import FacilityDataset
+from kolibri.core.content.apps import KolibriContentConfig
+from kolibri.core.content.constants.kind_to_learningactivity import kind_activity_map
+from kolibri.core.content.kolibri_plugin import synchronize_content_requests
+from kolibri.core.content.models import ChannelMetadata
+from kolibri.core.content.models import ContentNode
+from kolibri.core.content.models import File
+from kolibri.core.content.tasks import backfill_content_request_priority
+from kolibri.core.content.tasks import enqueue_automatic_resource_import_if_needed
+from kolibri.core.content.utils.annotation import calculate_included_languages
+from kolibri.core.content.utils.annotation import calculate_ordered_categories
+from kolibri.core.content.utils.annotation import calculate_ordered_grade_levels
+from kolibri.core.content.utils.annotation import set_channel_ancestors
+from kolibri.core.content.utils.annotation import set_content_visibility_from_disk
+from kolibri.core.content.utils.channel_import import FutureSchemaError
+from kolibri.core.content.utils.channel_import import import_channel_from_local_db
+from kolibri.core.content.utils.channel_import import InvalidSchemaVersionError
+from kolibri.core.content.utils.channels import get_channel_ids_for_content_dirs
+from kolibri.core.content.utils.content_types_tools import renderable_preset_bits
+from kolibri.core.content.utils.paths import get_all_content_dir_paths
+from kolibri.core.content.utils.paths import get_content_database_file_path
+from kolibri.core.content.utils.search import annotate_label_bitmasks
+from kolibri.core.content.utils.search import annotate_modality
+from kolibri.core.content.utils.search import get_all_contentnode_label_metadata
+from kolibri.core.content.utils.sqlalchemybridge import Bridge
+from kolibri.core.content.utils.tree import get_channel_node_depth
+from kolibri.core.device.models import ContentCacheKey
+from kolibri.core.upgrade import version_upgrade
+
+logger = logging.getLogger(__name__)
+
+
+# Only bother doing this if we are moving from
+# a version of Kolibri before we imported
+# content databases.
+@version_upgrade(old_version="<0.6.0")
+def import_external_content_dbs():
+    """
+    If we are potentially moving from a version of Kolibri that did not import its content data,
+    scan through the content database folder for all channel content databases,
+    and pull the data from each database if we have not already imported it.
+    """
+    channel_ids = get_channel_ids_for_content_dirs(get_all_content_dir_paths())
+    for channel_id in channel_ids:
+        if not ChannelMetadata.objects.filter(id=channel_id).exists():
+            try:
+                import_channel_from_local_db(channel_id)
+                set_content_visibility_from_disk(channel_id)
+            except (InvalidSchemaVersionError, FutureSchemaError):
+                logger.warning(
+                    "Tried to import channel {channel_id}, but database file was incompatible".format(
+                        channel_id=channel_id
+                    )
+                )
+            except DatabaseError:
+                logger.warning(
+                    "Tried to import channel {channel_id}, but database file was corrupted.".format(
+                        channel_id=channel_id
+                    )
+                )
+
+
+# This issue was fixed by 0.9.2, so only do this
+# when upgrading from versions prior to this.
+@version_upgrade(old_version="<0.9.2")
+def fix_multiple_trees_with_tree_id1():
+    # Do a check for improperly imported ContentNode trees
+    # These trees have been naively imported, and so there are multiple trees
+    # with tree_ids set to 1. Just check the root nodes to reduce the query size.
+    tree_id_one_channel_ids = ContentNode.objects.filter(
+        parent=None, tree_id=1
+    ).values_list("channel_id", flat=True)
+    if len(tree_id_one_channel_ids) > 1:
+        logger.warning("Improperly imported channels discovered")
+        # There is more than one channel with a tree_id of 1
+        # Find which channel has the most content nodes, and then delete and reimport the rest.
+        channel_sizes = {}
+        for channel_id in tree_id_one_channel_ids:
+            channel_sizes[channel_id] = ContentNode.objects.filter(
+                channel_id=channel_id
+            ).count()
+        # Get sorted list of ids by increasing number of nodes
+        sorted_channel_ids = sorted(channel_sizes, key=channel_sizes.get)
+        # Loop through all but the largest channel, delete and reimport
+        count = 0
+
+        for channel_id in sorted_channel_ids[:-1]:
+            # Double check that we have a content db to import from before deleting any metadata
+            if os.path.exists(get_content_database_file_path(channel_id)):
+                logger.warning(
+                    "Deleting and reimporting channel metadata for {channel_id}".format(
+                        channel_id=channel_id
+                    )
+                )
+                ChannelMetadata.objects.get(
+                    id=channel_id
+                ).delete_content_tree_and_files()
+                import_channel_from_local_db(channel_id)
+                logger.info(
+                    "Successfully reimported channel metadata for {channel_id}".format(
+                        channel_id=channel_id
+                    )
+                )
+                count += 1
+            else:
+                logger.warning(
+                    "Attempted to reimport channel metadata for channel {channel_id} but no content database found".format(
+                        channel_id=channel_id
+                    )
+                )
+        if count:
+            logger.info(
+                "Successfully reimported channel metadata for {count} channels".format(
+                    count=count
+                )
+            )
+        failed_count = len(sorted_channel_ids) - 1 - count
+        if failed_count:
+            logger.warning(
+                "Failed to reimport channel metadata for {count} channels".format(
+                    count=failed_count
+                )
+            )
+
+
+# This was introduced in 0.12.4, so only annotate
+# when upgrading from versions prior to this.
+@version_upgrade(old_version="<0.12.4")
+def update_num_coach_contents():
+    """
+    Function to set num_coach_content on all topic trees to account for
+    those that were imported before annotations were performed
+    """
+    bridge = Bridge(app_name=KolibriContentConfig.label)
+
+    ContentNodeTable = bridge.get_table(ContentNode)
+
+    connection = bridge.get_connection()
+
+    child = ContentNodeTable.alias()
+
+    logger.info("Updating num_coach_content on existing channels")
+
+    # start a transaction
+
+    trans = connection.begin()
+
+    # Update all leaf ContentNodes to have num_coach_content to 1 or 0
+    connection.execute(
+        ContentNodeTable.update()
+        .where(
+            # That are not topics
+            ContentNodeTable.c.kind != content_kinds.TOPIC
+        )
+        .values(num_coach_contents=cast(ContentNodeTable.c.coach_content, Integer()))
+    )
+
+    # Expression to capture all available child nodes of a contentnode
+    available_nodes = select(child.c.available).where(
+        and_(
+            child.c.available == True,  # noqa
+            ContentNodeTable.c.id == child.c.parent_id,
+        )
+    )
+
+    # Expression that sums the total number of coach contents for each child node
+    # of a contentnode
+    coach_content_num = select(func.sum(child.c.num_coach_contents)).where(
+        and_(
+            child.c.available == True,  # noqa
+            ContentNodeTable.c.id == child.c.parent_id,
+        )
+    )
+
+    for channel_id in ChannelMetadata.objects.all().values_list("id", flat=True):
+        node_depth = get_channel_node_depth(bridge, channel_id)
+
+        # Go from the deepest level to the shallowest
+        for level in range(node_depth, 0, -1):
+            # Only modify topic availability here
+            connection.execute(
+                ContentNodeTable.update()
+                .where(
+                    and_(
+                        ContentNodeTable.c.level == level - 1,
+                        ContentNodeTable.c.channel_id == channel_id,
+                        ContentNodeTable.c.kind == content_kinds.TOPIC,
+                    )
+                )
+                # Because we have set availability to False on all topics as a starting point
+                # we only need to make updates to topics with available children.
+                .where(exists(available_nodes))
+                .values(num_coach_contents=coach_content_num.scalar_subquery())
+            )
+
+    # commit the transaction
+    trans.commit()
+
+    bridge.end()
+
+
+# This was introduced in 0.13.0, so only annotate
+# when upgrading from versions prior to this.
+@version_upgrade(old_version="<0.13.0")
+def update_on_device_resources():
+    """
+    Function to set on_device_resource on all topic trees to account for
+    those that were imported before annotations were performed
+    """
+    bridge = Bridge(app_name=KolibriContentConfig.label)
+
+    ContentNodeTable = bridge.get_table(ContentNode)
+
+    connection = bridge.get_connection()
+
+    child = ContentNodeTable.alias()
+
+    logger.info("Updating on_device_resource on existing channels")
+
+    # start a transaction
+
+    trans = connection.begin()
+
+    # Update all leaf ContentNodes to have on_device_resource to 1 or 0
+    connection.execute(
+        ContentNodeTable.update()
+        .where(
+            # That are not topics
+            ContentNodeTable.c.kind != content_kinds.TOPIC
+        )
+        .values(on_device_resources=cast(ContentNodeTable.c.available, Integer()))
+    )
+
+    # Expression to capture all available child nodes of a contentnode
+    available_nodes = select(child.c.available).where(
+        and_(
+            child.c.available == True,  # noqa
+            ContentNodeTable.c.id == child.c.parent_id,
+        )
+    )
+
+    # Expression that sums the total number of coach contents for each child node
+    # of a contentnode
+    on_device_num = select(func.sum(child.c.on_device_resources)).where(
+        and_(
+            child.c.available == True,  # noqa
+            ContentNodeTable.c.id == child.c.parent_id,
+        )
+    )
+
+    for channel_id in ChannelMetadata.objects.all().values_list("id", flat=True):
+        node_depth = get_channel_node_depth(bridge, channel_id)
+
+        # Go from the deepest level to the shallowest
+        for level in range(node_depth, 0, -1):
+            # Only modify topic availability here
+            connection.execute(
+                ContentNodeTable.update()
+                .where(
+                    and_(
+                        ContentNodeTable.c.level == level - 1,
+                        ContentNodeTable.c.channel_id == channel_id,
+                        ContentNodeTable.c.kind == content_kinds.TOPIC,
+                    )
+                )
+                # Because we have set availability to False on all topics as a starting point
+                # we only need to make updates to topics with available children.
+                .where(exists(available_nodes))
+                .values(on_device_resources=on_device_num)
+            )
+
+    # commit the transaction
+    trans.commit()
+
+    bridge.end()
+
+
+# This was introduced in 0.15.0, so only annotate
+# when upgrading from versions prior to this.
+@version_upgrade(old_version="<0.15.0")
+def metadata_annotation_update():
+    """
+    Function to:
+    - set learning_activities on all ContentNodes to account for
+    those that were imported before the content import machinery handled the mapping
+    - annotate bitmasks for labels for any learning activities for efficient lookup
+    - populate the initial cache for available labels
+    - annotate all ancestors onto ContentNodes to avoid costly queries
+    """
+    for kind, learning_activity in kind_activity_map.items():
+        ContentNode.objects.filter(kind=kind).update(
+            learning_activities=learning_activity
+        )
+    annotate_label_bitmasks(ContentNode.objects.all())
+    get_all_contentnode_label_metadata()
+
+    for channel_id in ChannelMetadata.objects.values_list("id", flat=True):
+        set_channel_ancestors(channel_id)
+    ContentCacheKey.update_cache_key()
+
+
+# This was introduced in 0.16.0, so only annotate
+# when upgrading from versions prior to this.
+@version_upgrade(old_version="<0.16.0")
+def admin_imported_flag():
+    """
+    Function to set the admin_imported flag to True for any currently
+    available resources, as resources could only be imported by admins
+    until now!
+    """
+    ContentNode.objects.filter(available=True).exclude(kind=content_kinds.TOPIC).update(
+        admin_imported=True
+    )
+
+    ContentCacheKey.update_cache_key()
+
+
+@version_upgrade(old_version="<0.16.0")
+def synchronize_content_requests_upgrade():
+    """
+    Synchronizes content requests for each dataset on the device,
+    excluding datasets with a transfer_session_id.
+    """
+
+    dataset_ids = FacilityDataset.objects.values_list("id", flat=True)
+
+    # Synchronize content requests for each dataset
+    for dataset_id in dataset_ids:
+        synchronize_content_requests(dataset_id, transfer_session=None)
+
+    enqueue_automatic_resource_import_if_needed()
+
+
+@version_upgrade(old_version="<0.18.0")
+def ordered_metadata_in_channels():
+    """
+    Update the channel metadata to have grade_levels, categories,
+    and included languages ordered by occurrence in the channel resources
+    """
+    for channel in ChannelMetadata.objects.all():
+        calculate_ordered_categories(channel)
+        calculate_ordered_grade_levels(channel)
+        calculate_included_languages(channel)
+    ContentCacheKey.update_cache_key()
+
+
+@version_upgrade(old_version="<0.19.1")
+def contentnode_modality_annotation_update():
+    """
+    annotate modality for all ContentNodes based on options.modality
+    """
+    annotate_modality(ContentNode.objects.all())
+
+
+@version_upgrade(old_version="<0.19.4")
+def backfill_content_request_priority_upgrade():
+    """
+    Enqueues a background task to set priority=ContentRequestPriority.REGULAR on any ContentRequest rows that
+    pre-date the priority column.  Running this asynchronously avoids a long-running
+    UPDATE that would stall the upgrade on large tables.
+    """
+    backfill_content_request_priority.enqueue_if_not_active()
+
+
+@version_upgrade(old_version="<0.19.4")
+def populate_channel_library_field():
+    """
+    Populate library="KOLIBRI" for existing public channels that have no library set.
+    Channels imported from Kolibri Studio's public catalogue are part of the KOLIBRI library.
+    """
+    ChannelMetadata.objects.filter(public=True, library__isnull=True).update(
+        library=library_constants.KOLIBRI
+    )
+
+
+# Cap each backfill UPDATE so a channel library with millions of file rows does
+# not produce a single long-running statement that could time out.
+INCLUDED_PRESETS_BACKFILL_BATCH_SIZE = 10000
+
+
+@version_upgrade(old_version="<0.20.0")
+def file_included_presets_annotation():
+    """
+    Backfill File.included_presets for rows imported before the column existed,
+    setting each renderable file's own-preset bit and leaving others null.
+    """
+    for preset, bit in renderable_preset_bits.items():
+        # Loop until no still-null rows remain: each pass sets its matched rows
+        # non-null, shrinking the set the next pass can match.
+        updated = True
+        while updated:
+            batch = File.objects.filter(
+                preset=preset, included_presets__isnull=True
+            ).values("pk")[:INCLUDED_PRESETS_BACKFILL_BATCH_SIZE]
+            updated = bool(
+                File.objects.filter(pk__in=batch).update(included_presets=bit)
+            )

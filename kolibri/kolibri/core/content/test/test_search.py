@@ -1,0 +1,243 @@
+from uuid import uuid4
+
+from django.test import TestCase
+from le_utils.constants import content_kinds
+from le_utils.constants import modalities
+from parameterized import parameterized
+
+from kolibri.core.content.models import ContentNode
+from kolibri.core.content.test.helpers import ChannelBuilder
+from kolibri.core.content.utils.search import annotate_label_bitmasks
+from kolibri.core.content.utils.search import annotate_modality
+from kolibri.core.content.utils.search import get_available_metadata_labels
+from kolibri.core.content.utils.search import metadata_lookup
+
+
+class RandomBitMaskTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        builder = ChannelBuilder()
+        builder.insert_into_default_db()
+        annotate_label_bitmasks(ContentNode.objects.all())
+
+    @parameterized.expand(
+        (field, label)
+        for field in metadata_lookup.keys()
+        for label in metadata_lookup[field]
+    )
+    def test_bitmasks(self, field, label):
+        self.assertEqual(
+            ContentNode.objects.filter(**{field + "__contains": label}).count(),
+            ContentNode.objects.has_all_labels(field, [label]).count(),
+            "{} {}".format(field, label),
+        )
+
+
+class ConstrainedBitMaskTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        for field in metadata_lookup.keys():
+            for label in metadata_lookup[field]:
+                ContentNode.objects.create(
+                    content_id=uuid4().hex,
+                    channel_id=uuid4().hex,
+                    description="Blah blah blah",
+                    id=uuid4().hex,
+                    license_name="GNU",
+                    license_owner="",
+                    license_description=None,
+                    lang_id=None,
+                    author="",
+                    title="Test{}_{}".format(field, label),
+                    parent_id=None,
+                    kind=content_kinds.VIDEO,
+                    coach_content=False,
+                    available=False,
+                    **{field: label},
+                )
+        annotate_label_bitmasks(ContentNode.objects.all())
+
+    @parameterized.expand(
+        (field, label)
+        for field in metadata_lookup.keys()
+        for label in metadata_lookup[field]
+    )
+    def test_bitmasks(self, field, label):
+        self.assertEqual(
+            ContentNode.objects.filter(**{field + "__contains": label}).count(),
+            ContentNode.objects.has_all_labels(field, [label]).count(),
+            "{} {}".format(field, label),
+        )
+
+    def test_bitmasks_and_not_or(self):
+        for field in metadata_lookup.keys():
+            node = ContentNode.objects.create(
+                content_id=uuid4().hex,
+                channel_id=uuid4().hex,
+                description="Blah blah blah",
+                id=uuid4().hex,
+                license_name="GNU",
+                license_owner="",
+                license_description=None,
+                lang_id=None,
+                author="",
+                title="Test{}".format(field),
+                parent_id=None,
+                kind=content_kinds.VIDEO,
+                coach_content=False,
+                available=False,
+                **{field: ",".join(metadata_lookup[field])},
+            )
+            annotate_label_bitmasks(ContentNode.objects.filter(id=node.id))
+            self.assertEqual(
+                1,
+                ContentNode.objects.has_all_labels(
+                    field, metadata_lookup[field]
+                ).count(),
+                "{}".format(field),
+            )
+
+
+class RandomMetadataLabelsTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        builder = ChannelBuilder()
+        builder.insert_into_default_db()
+        annotate_label_bitmasks(ContentNode.objects.all())
+
+    def _run_test_for_qs(self, queryset):
+        metadata_labels = get_available_metadata_labels(queryset)
+        for field, LIST in metadata_labels.items():
+            if field != "channels" and field != "languages":
+                all_labels = metadata_lookup[field]
+                for label in all_labels:
+                    if label in LIST:
+                        self.assertTrue(
+                            queryset.filter(**{field + "__contains": label}).exists(),
+                            "{} {}".format(field, label),
+                        )
+                    else:
+                        self.assertFalse(
+                            queryset.filter(**{field + "__contains": label}).exists(),
+                            "{} {}".format(field, label),
+                        )
+
+    def test_all(self):
+        self._run_test_for_qs(ContentNode.objects.all())
+
+    @parameterized.expand(content_kinds.choices)
+    def test_filtered_kind(self, kind, kind_name):
+        self._run_test_for_qs(ContentNode.objects.filter(kind=kind))
+
+    @parameterized.expand(
+        (field, label)
+        for field in metadata_lookup.keys()
+        for label in metadata_lookup[field]
+    )
+    def test_labels(self, field, label):
+        self._run_test_for_qs(ContentNode.objects.has_all_labels(field, [label]))
+
+
+class ConstrainedMetadataLabelsTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        for field in metadata_lookup.keys():
+            for label in metadata_lookup[field]:
+                ContentNode.objects.create(
+                    content_id=uuid4().hex,
+                    channel_id=uuid4().hex,
+                    description="Blah blah blah",
+                    id=uuid4().hex,
+                    license_name="GNU",
+                    license_owner="",
+                    license_description=None,
+                    lang_id=None,
+                    author="",
+                    title="Test{}_{}".format(field, label),
+                    parent_id=None,
+                    kind=content_kinds.VIDEO,
+                    coach_content=False,
+                    available=False,
+                    **{field: label},
+                )
+        annotate_label_bitmasks(ContentNode.objects.all())
+
+    @parameterized.expand(
+        (field, label)
+        for field in metadata_lookup.keys()
+        for label in metadata_lookup[field]
+    )
+    def test_labels(self, field, label):
+        metadata_labels = get_available_metadata_labels(
+            ContentNode.objects.filter(**{field: label})
+        )
+        split_labels = label.split(".")
+        expected = [
+            ".".join(split_labels[0:i]) for i in range(1, len(split_labels) + 1)
+        ]
+        self.assertEqual(
+            set(metadata_labels[field]), set(expected), "{} {}".format(field, label)
+        )
+
+    @parameterized.expand(
+        field for field in (list(metadata_lookup.keys()) + ["channels", "languages"])
+    )
+    def test_labels_empty_queryset(self, field):
+        try:
+            labels = get_available_metadata_labels(ContentNode.objects.none())
+        except Exception as e:
+            self.fail("get_available_metadata_labels raised {}".format(e))
+        self.assertEqual(labels[field], [])
+
+
+class AnnotateModalityTestCase(TestCase):
+    """
+    Test case for annotate_modality function
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        builder = ChannelBuilder(levels=4)
+        builder.insert_into_default_db()
+        cls.course_folder = ContentNode.objects.filter(kind=content_kinds.TOPIC).first()
+        cls.course_folder.options = {"modality": modalities.COURSE}
+        cls.course_folder.save()
+        cls.unit_folder = (
+            cls.course_folder.get_children().filter(kind=content_kinds.TOPIC).first()
+        )
+        cls.unit_folder.options = {"modality": modalities.UNIT}
+        cls.unit_folder.save()
+        cls.lesson_folder = (
+            cls.unit_folder.get_children().filter(kind=content_kinds.TOPIC).first()
+        )
+        cls.lesson_folder.options = {"modality": modalities.LESSON}
+        cls.lesson_folder.save()
+
+    def test_annotate_modality_updates_field(self):
+        """Test that annotate_modality correctly updates the modality field"""
+        annotate_modality(ContentNode.objects.all())
+
+        self.course_folder.refresh_from_db()
+        self.unit_folder.refresh_from_db()
+        self.lesson_folder.refresh_from_db()
+
+        self.assertEqual(self.course_folder.modality, modalities.COURSE)
+        self.assertEqual(self.unit_folder.modality, modalities.UNIT)
+        self.assertEqual(self.lesson_folder.modality, modalities.LESSON)
+
+    def test_annotate_modality_with_no_options(self):
+        node = ContentNode.objects.exclude(kind=content_kinds.TOPIC).first()
+        node.options = {}
+        node.save()
+
+        annotate_modality(ContentNode.objects.filter(id=node.id))
+
+        node.refresh_from_db()
+        self.assertIsNone(node.modality)
+
+    def test_annotate_modality_with_empty_queryset(self):
+        """Test annotate_modality with empty queryset"""
+        empty_queryset = ContentNode.objects.none()
+
+        # This should not raise an error
+        annotate_modality(empty_queryset)

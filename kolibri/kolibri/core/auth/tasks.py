@@ -1,0 +1,830 @@
+import datetime
+import logging
+import ntpath
+
+from django.conf import settings
+from django.core.files.storage import default_storage
+from django.core.management import call_command
+from django.core.management.base import CommandError
+from django.db.utils import OperationalError
+from django.utils import timezone
+from morango.errors import MorangoError
+from requests.exceptions import ConnectionError
+from requests.exceptions import HTTPError
+from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import ValidationError
+
+from kolibri.core.auth.constants.demographics import NOT_SPECIFIED
+from kolibri.core.auth.constants.morango_sync import State as FacilitySyncState
+from kolibri.core.auth.constants.user_kinds import ADMIN
+from kolibri.core.auth.constants.user_kinds import ASSIGNABLE_COACH
+from kolibri.core.auth.constants.user_kinds import COACH
+from kolibri.core.auth.constants.user_kinds import SUPERUSER
+from kolibri.core.auth.errors import NoAvailableSequences
+from kolibri.core.auth.models import Facility
+from kolibri.core.auth.models import FacilityUser
+from kolibri.core.auth.utils.picture_passwords import assign_picture_password
+from kolibri.core.auth.utils.picture_passwords import get_learner_count
+from kolibri.core.auth.utils.sync import find_soud_sync_sessions
+from kolibri.core.auth.utils.sync import validate_and_create_sync_credentials
+from kolibri.core.auth.utils.users import get_remote_user_info
+from kolibri.core.auth.utils.users import get_remote_users_info
+from kolibri.core.device import soud
+from kolibri.core.device.translation import get_device_language
+from kolibri.core.device.translation import get_settings_language
+from kolibri.core.discovery.models import NetworkLocation
+from kolibri.core.discovery.utils.network.client import NetworkClient
+from kolibri.core.discovery.utils.network.errors import NetworkClientError
+from kolibri.core.discovery.utils.network.errors import ResourceGoneError
+from kolibri.core.error_constants import DEVICE_LIMITATIONS
+from kolibri.core.serializers import HexOnlyUUIDField
+from kolibri.core.tasks.decorators import register_task
+from kolibri.core.tasks.exceptions import JobNotFound
+from kolibri.core.tasks.exceptions import JobRunning
+from kolibri.core.tasks.job import JobStatus
+from kolibri.core.tasks.job import Priority
+from kolibri.core.tasks.job import State
+from kolibri.core.tasks.main import job_storage
+from kolibri.core.tasks.permissions import IsAdminForJob
+from kolibri.core.tasks.permissions import IsSuperAdmin
+from kolibri.core.tasks.permissions import NotProvisioned
+from kolibri.core.tasks.utils import get_current_job
+from kolibri.core.tasks.validation import JobValidator
+from kolibri.core.utils.retry import retry
+from kolibri.utils.translation import gettext as _
+
+logger = logging.getLogger(__name__)
+SOUD_SYNC_PROCESSING_JOB_ID = "50"
+
+
+def status_fn(job):
+    # Translators: A notification title shown to users when their Kolibri device is syncing data to another Kolibri instance
+    data_syncing_in_progress = _("Data syncing in progress")
+
+    # Translators: Notification text shown to users when their Kolibri device is syncing data to another Kolibri instance
+    # to encourage them to stay connected to their network to ensure a successful sync.
+    do_not_disconnect = _("Do not disconnect your device from the network.")
+    return JobStatus(data_syncing_in_progress, do_not_disconnect)
+
+
+class LocaleChoiceField(serializers.ChoiceField):
+    """
+    Because our default choices and values require initializing Django
+    we wrap them in getters to avoid trying to initialize Django when
+    this field is instantiated, which normally happens at time of module import.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__([], **kwargs)
+        self._choices_set = False
+
+    @property
+    def default(self):
+        if not hasattr(self, "_default"):
+            return get_device_language() or get_settings_language()
+        return self._default
+
+    @default.setter
+    def default(self, value):
+        self._default = value
+
+    def _set_choices(self):
+        if not self._choices_set:
+            self._choices_set = True
+            # Use the internal Choice field _set_choices setter method here
+            super()._set_choices(settings.LANGUAGES)
+
+    def to_internal_value(self, data):
+        self._set_choices()
+        return super().to_internal_value(data)
+
+    def to_representation(self, value):
+        self._set_choices()
+        return super().to_representation(value)
+
+    @property
+    def choices(self):
+        self._set_choices()
+        return self._choices
+
+    @choices.setter
+    def choices(self, value):
+        # Make this a no op, as we are only setting his in the getter above.
+        pass
+
+
+class ImportUsersFromCSVValidator(JobValidator):
+    csvfile = serializers.FileField(required=False, use_url=False)
+    csvfilename = serializers.CharField(required=False)
+    dryrun = serializers.BooleanField(default=False)
+    delete = serializers.BooleanField(default=False)
+    locale = LocaleChoiceField()
+    facility = serializers.PrimaryKeyRelatedField(
+        queryset=Facility.objects.all(), allow_null=True, default=None
+    )
+
+    def validate(self, data):
+        if data.get("csvfile") and data.get("csvfilename"):
+            raise serializers.ValidationError(
+                "Only one of csvfile or csvfilename can be specified"
+            )
+        if not data.get("csvfile") and not data.get("csvfilename"):
+            raise serializers.ValidationError(
+                "One of csvfile or csvfilename must be specified"
+            )
+
+        facility = data.get("facility")
+        if facility:
+            facility_id = facility.id
+        elif not facility and "user" in self.context:
+            facility_id = self.context["user"].facility_id
+        else:
+            raise serializers.ValidationError("Facility must be specified")
+
+        if "csvfile" in data:
+            tmp_path = data["csvfile"].temporary_file_path()
+            filename = ntpath.basename(tmp_path)
+            filepath = default_storage.save("temp/{}".format(filename), data["csvfile"])
+        else:
+            filepath = "temp/{}".format(data["csvfilename"])
+            if not default_storage.exists(filepath):
+                raise serializers.ValidationError("Supplied csvfilename does not exist")
+
+        args = [filepath]
+        kwargs = {
+            "locale": data.get("locale"),
+            "facility": facility_id,
+            "dryrun": data.get("dryrun", False),
+            "delete": data.get("delete", False),
+        }
+
+        if "user" in self.context:
+            kwargs["userid"] = self.context["user"].id
+        return {
+            "args": args,
+            "kwargs": kwargs,
+            "facility_id": facility_id,
+        }
+
+
+@register_task(
+    validator=ImportUsersFromCSVValidator,
+    track_progress=True,
+    permission_classes=[IsAdminForJob],
+)
+def importusersfromcsv(
+    filepath, facility=None, userid=None, locale=None, dryrun=False, delete=False
+):
+    """
+    Import users, classes, roles and roles assignemnts from a csv file.
+    :param: FILE: file dictionary with the file object
+    :param: csvfile: filename of the file stored in kolibri temp folder
+    :param: dryrun: validate the data but don't modify the database
+    :param: delete: Users not in the csv will be deleted from the facility, and classes cleared
+    :returns: An object with the job information
+    """
+
+    try:
+        call_command(
+            "bulkimportusers",
+            filepath,
+            use_storage=True,
+            facility=facility,
+            userid=userid,
+            locale=locale,
+            dryrun=dryrun,
+            delete=delete,
+        )
+    except (CommandError, serializers.ValidationError):
+        # There was an error in the command so we need to delete the file since they
+        # need to fix and re-upload.
+        default_storage.delete(filepath)
+        raise
+
+    if not dryrun and default_storage.exists(filepath):
+        # We remove the file on a wetrun, since it is no longer needed
+        default_storage.delete(filepath)
+
+
+class ExportUsersToCSVValidator(JobValidator):
+    locale = LocaleChoiceField()
+    facility = serializers.PrimaryKeyRelatedField(
+        queryset=Facility.objects.all(), allow_null=True, default=None
+    )
+
+    def validate(self, data):
+        facility = data.get("facility")
+        if facility:
+            facility_id = facility.id
+        elif not facility and "user" in self.context:
+            facility_id = self.context["user"].facility_id
+        else:
+            raise serializers.ValidationError("Facility must be specified")
+        return {
+            "kwargs": {"locale": data.get("locale"), "facility": facility_id},
+            "facility_id": facility_id,
+        }
+
+
+@register_task(
+    validator=ExportUsersToCSVValidator,
+    track_progress=True,
+    permission_classes=[IsAdminForJob],
+)
+def exportuserstocsv(facility=None, locale=None):
+    """
+    Export users, classes, roles and roles assignemnts to a csv file.
+
+    :param: facility_id
+    :returns: An object with the job information
+    """
+
+    call_command(
+        "bulkexportusers",
+        use_storage=True,
+        facility=facility,
+        locale=locale,
+        overwrite="true",
+    )
+
+
+class SyncJobValidator(JobValidator):
+    facility = serializers.PrimaryKeyRelatedField(queryset=Facility.objects.all())
+    facility_name = serializers.CharField(required=False)
+    command = serializers.ChoiceField(choices=["sync", "resumesync"], default="sync")
+    sync_session_id = HexOnlyUUIDField(format="hex", required=False, allow_null=True)
+
+    def validate(self, data):
+        if not data.get("sync_session_id") and data["command"] == "resumesync":
+            raise serializers.ValidationError(
+                "sync_session_id must be specified for resumesync"
+            )
+        facility = data["facility"]
+        if isinstance(facility, Facility):
+            facility_id = facility.id
+            facility_name = facility.name
+        else:
+            facility_id = facility
+            facility_name = data["facility_name"]
+        kwargs = dict(
+            chunk_size=200,
+            noninteractive=True,
+        )
+        if data["command"] == "resumesync":
+            # Selectively add in the sync_session_id if resuming
+            # as the sync command will reject the id parameter.
+            kwargs["id"] = data["sync_session_id"]
+        else:
+            kwargs["facility"] = facility_id
+        return {
+            "extra_metadata": dict(
+                facility_id=facility_id,
+                facility_name=facility_name,
+                sync_state=FacilitySyncState.PENDING,
+                bytes_sent=0,
+                bytes_received=0,
+            ),
+            "facility_id": facility_id,
+            "kwargs": kwargs,
+            "args": [data["command"]],
+        }
+
+
+facility_task_queue = "facility_task"
+
+
+@register_task(
+    validator=SyncJobValidator,
+    permission_classes=[IsAdminForJob],
+    track_progress=True,
+    cancellable=False,
+    queue=facility_task_queue,
+    long_running=True,
+    status_fn=status_fn,
+)
+def dataportalsync(command, **kwargs):
+    """
+    Initiate a PUSH sync with Kolibri Data Portal.
+    """
+    call_command(command, **kwargs)
+
+
+# 24 hours in seconds
+KDP_SYNC_INTERVAL = 60 * 60 * 24
+# 1 hour in seconds
+KDP_SYNC_RETRY_INTERVAL = 60 * 60
+
+
+def enqueue_automatic_kdp_sync(facility):
+    """
+    Enqueue a recurring daily sync with KDP for the given facility.
+    Uses a deterministic job ID to prevent duplicate schedules.
+    Retries hourly on failure (e.g. when KDP is unreachable).
+    """
+    validator = SyncJobValidator(
+        data={
+            "type": "kolibri.core.auth.tasks.dataportalsync",
+            "facility": facility.id,
+        }
+    )
+    validator.is_valid(raise_exception=True)
+    job_data = validator.validated_data
+    job_data.pop("enqueue_args", None)
+    try:
+        # Use enqueue_in (not enqueue) because only enqueue_in supports
+        # interval/repeat/retry_interval for recurring scheduling.
+        dataportalsync.enqueue_in(
+            datetime.timedelta(seconds=0),
+            interval=KDP_SYNC_INTERVAL,
+            repeat=None,
+            retry_interval=KDP_SYNC_RETRY_INTERVAL,
+            job_id="kdp_sync_{}".format(facility.id),
+            **job_data,
+        )
+    except JobRunning:
+        logger.info("KDP sync already running for facility {}".format(facility.name))
+
+
+class PeerSyncJobValidator(SyncJobValidator):
+    baseurl = serializers.URLField(required=False)
+    device_id = serializers.PrimaryKeyRelatedField(
+        queryset=NetworkLocation.objects.all(), required=False
+    )
+
+    @retry(NetworkClientError)
+    def _get_base_url(self, baseurl):
+        self.client = NetworkClient.build_for_address(baseurl)
+        return self.client.base_url
+
+    def validate(self, data):
+        job_data = super().validate(data)
+        if "baseurl" not in data and "device_id" not in data:
+            raise serializers.ValidationError(
+                "Either baseurl or device_id must be specified"
+            )
+        if data.get("device_id", None) is not None:
+            if not data["device_id"].base_url:
+                raise serializers.ValidationError("Device has no base url")
+            data["baseurl"] = data["device_id"].base_url
+        else:
+            try:
+                data["device_id"] = NetworkLocation.objects.filter(
+                    base_url=data["baseurl"]
+                ).first()
+            except NetworkLocation.DoesNotExist:
+                pass
+        try:
+            baseurl = self._get_base_url(data["baseurl"])
+        except NetworkClientError:
+            raise ResourceGoneError()
+
+        if data.get("device_id", None) is not None:
+            device_name = data["device_id"].nickname or data["device_id"].device_name
+            device_id = data["device_id"].id
+        else:
+            device_name = ""
+            device_id = ""
+
+        job_data["extra_metadata"].update(
+            dict(
+                device_name=device_name,
+                device_id=device_id,
+                baseurl=baseurl,
+            )
+        )
+        job_data["kwargs"].update(dict(baseurl=baseurl))
+        return job_data
+
+
+class PeerFacilitySyncJobValidator(PeerSyncJobValidator):
+    def validate(self, data):
+        job_data = super().validate(data)
+        validate_and_create_sync_credentials(
+            job_data["kwargs"]["baseurl"],
+            job_data["facility_id"],
+            data.get("username"),
+            data.get("password"),
+        )
+        return job_data
+
+
+@register_task(
+    validator=PeerFacilitySyncJobValidator,
+    permission_classes=[IsAdminForJob],
+    track_progress=True,
+    cancellable=False,
+    queue=facility_task_queue,
+    long_running=True,
+    status_fn=status_fn,
+)
+def peerfacilitysync(command, **kwargs):
+    """
+    Initiate a SYNC (PULL + PUSH) of a specific facility from another device.
+    """
+    call_command(command, **kwargs)
+
+
+class PeerFacilityImportJobValidator(PeerFacilitySyncJobValidator):
+    facility = HexOnlyUUIDField()
+    facility_name = serializers.CharField(default="")
+    username = serializers.CharField()
+    password = serializers.CharField(default=NOT_SPECIFIED, required=False)
+
+    def validate(self, data):
+        job_data = super().validate(data)
+        job_data["kwargs"].update(
+            dict(
+                no_push=True,
+                no_provision=True,
+            )
+        )
+        return job_data
+
+
+@register_task(
+    validator=PeerFacilityImportJobValidator,
+    permission_classes=[IsSuperAdmin() | NotProvisioned()],
+    track_progress=True,
+    cancellable=False,
+    queue=facility_task_queue,
+    long_running=True,
+    status_fn=status_fn,
+)
+def peerfacilityimport(command, **kwargs):
+    """
+    Initiate a PULL of a specific facility from another device.
+    """
+    call_command(command, **kwargs)
+
+
+class DeleteFacilityValidator(JobValidator):
+    facility = serializers.PrimaryKeyRelatedField(queryset=Facility.objects.all())
+
+    def validate_facility(self, facility):
+        if "user" in self.context:
+            # Because all users are facility users, this also acts as a check against
+            # deleting the only facility on a device, as the only user who could do
+            # that must also be a member of that facility.
+            user = self.context["user"]
+            if user.is_authenticated and user.facility_id == facility.id:
+                raise serializers.ValidationError("User is member of facility")
+        return facility
+
+    def validate(self, data):
+        facility = data["facility"]
+        return {
+            "args": (facility.id,),
+            "facility_id": facility.id,
+            "extra_metadata": dict(
+                facility=facility.id,
+                facility_name=facility.name,
+            ),
+        }
+
+
+soud_sync_queue = "soud_sync"
+
+
+@register_task(
+    job_id=SOUD_SYNC_PROCESSING_JOB_ID,
+    queue=soud_sync_queue,
+    priority=Priority.HIGH,
+    status_fn=status_fn,
+    long_running=True,
+)
+def soud_sync_processing():
+    # run processing
+    soud.execute_syncs()
+    # schedule next run
+    next_run = soud.get_time_to_next_attempt()
+    if next_run is not None:
+        job = get_current_job()
+        job.retry_in(next_run)
+    else:
+        logger.info("Skipping enqueue of SoUD sync processing: no attempts remaining")
+
+
+def enqueue_soud_sync_processing():
+    """
+    Enqueue a task to process SoUD syncs, if necessary
+    """
+    next_run = soud.get_time_to_next_attempt()
+    if next_run is None:
+        # No need to enqueue, as there is no next run
+        logger.info("Skipping enqueue of SoUD sync processing: no eligible syncs")
+        return
+
+    # Check if there is already an enqueued job
+    try:
+        converted_next_run = timezone.now() + next_run
+        orm_job = job_storage.get_orm_job(SOUD_SYNC_PROCESSING_JOB_ID)
+        if (
+            orm_job.state not in (State.COMPLETED, State.FAILED, State.CANCELED)
+            and orm_job.scheduled_time <= converted_next_run
+        ):
+            # Already queued sooner or at the same time as the next run
+            logger.info("Skipping enqueue of SoUD sync processing: scheduled sooner")
+            return
+    except JobNotFound:
+        pass
+
+    logger.info("Enqueuing SoUD sync processing in {}".format(next_run))
+    try:
+        soud_sync_processing.enqueue_in(next_run)
+    except JobRunning:
+        logger.info("Skipping enqueue of SoUD sync processing: already running")
+
+
+@register_task(
+    queue=soud_sync_queue,
+)
+def soud_sync_cleanup(**filters):
+    """
+    Targeted cleanup of active SoUD sessions
+
+    :param filters: A dict of queryset filters for SyncSession model
+    """
+    logger.debug("Running SoUD sync cleanup | {}".format(filters))
+    sync_sessions = find_soud_sync_sessions(**filters)
+    clean_up_ids = sync_sessions.values_list("id", flat=True)
+
+    if clean_up_ids:
+        call_command("cleanupsyncs", ids=clean_up_ids, expiration=0)
+
+
+def queue_soud_sync_cleanup(*sync_session_ids):
+    """
+    Queue targeted cleanup of active SoUD sessions
+
+    :param sync_session_ids: ID's of sync sessions we should cleanup
+    """
+    logger.info(
+        "Enqueueing cleanup of sync sessions: {}".format(", ".join(sync_session_ids))
+    )
+    return soud_sync_cleanup.enqueue(kwargs=dict(pk__in=sync_session_ids))
+
+
+def queue_soud_server_sync_cleanup(client_instance_id):
+    """
+    A server oriented cleanup of active SoUD sessions
+
+    :param client_instance_id: The Kolibri instance ID of the client
+    """
+    return soud_sync_cleanup.enqueue(
+        kwargs=dict(client_instance_id=client_instance_id, is_server=True)
+    )
+
+
+class PeerImportSingleSyncJobValidator(PeerSyncJobValidator):
+    username = serializers.CharField()
+    password = serializers.CharField(default=NOT_SPECIFIED, required=False)
+    user_id = HexOnlyUUIDField(required=False)
+    facility = HexOnlyUUIDField()
+    using_admin = serializers.BooleanField(default=False, required=False)
+    force_non_learner_import = serializers.BooleanField(default=False, required=False)
+
+    @retry((NetworkClientError, ResourceGoneError))
+    def _get_user_info(self, data):
+        using_admin = data.get("using_admin", False)
+        facility_id = data["facility"]
+        username = data["username"]
+        password = data["password"]
+        user_id = data.get("user_id")
+
+        if using_admin and user_id:
+            return get_remote_user_info(
+                self.client, facility_id, username, password, user_id
+            )
+
+        remote_users_info = get_remote_users_info(
+            None, facility_id, username, password, client=self.client
+        )
+        return remote_users_info["user"]
+
+    def validate(self, data):
+        """
+        In case an admin account credentials are provided, to sync a non-admin user,
+        the user_id of this non-admin user must be provided.
+        """
+        job_data = super().validate(data)
+        user_id = data.get("user_id", None)
+        force_non_learner_import = data.get("force_non_learner_import", False)
+        # Use pre-validated base URL
+        baseurl = job_data["kwargs"]["baseurl"]
+        facility_id = data["facility"]
+        username = data["username"]
+        password = data["password"]
+        try:
+            user_info = self._get_user_info(data)
+        except AuthenticationFailed as e:
+            raise ValidationError(detail=str(e.detail), code=e.detail.code)
+        except (NetworkClientError, ConnectionError):
+            raise ResourceGoneError()
+
+        full_name = user_info["full_name"]
+        roles = user_info["roles"]
+
+        # only learners can be synced unless user has confirmed intention to sync a non-learner:
+        if not force_non_learner_import:
+            not_syncable = (SUPERUSER, COACH, ASSIGNABLE_COACH, ADMIN)
+            if any(role in roles for role in not_syncable):
+                raise ValidationError(
+                    detail={
+                        "id": DEVICE_LIMITATIONS,
+                        "full_name": full_name,
+                        "roles": ", ".join(roles),
+                    }
+                )
+
+        user_id = user_info["id"]
+
+        try:
+            validate_and_create_sync_credentials(
+                baseurl, facility_id, username, password, user_id=user_id
+            )
+        except (NetworkClientError, ConnectionError):
+            raise ResourceGoneError()
+
+        job_data["extra_metadata"]["user_id"] = user_id
+        job_data["extra_metadata"]["username"] = user_info["username"]
+        job_data["extra_metadata"]["user_full_name"] = full_name
+
+        job_data["kwargs"]["user"] = user_id
+
+        job_data["kwargs"].update(
+            dict(
+                no_push=True,
+                no_provision=True,
+            )
+        )
+        return job_data
+
+
+@register_task(
+    validator=PeerImportSingleSyncJobValidator,
+    cancellable=False,
+    track_progress=True,
+    queue=soud_sync_queue,
+    priority=Priority.HIGH,
+    permission_classes=[IsSuperAdmin() | NotProvisioned()],
+    status_fn=status_fn,
+    long_running=True,
+    retry_on=[
+        OperationalError,
+        MorangoError,
+        HTTPError,
+        NetworkClientError,
+    ],
+)
+def peeruserimport(command, **kwargs):
+    try:
+        call_command(command, **kwargs)
+    except CommandError as e:
+        if "Unable to connect" in str(e):
+            raise NetworkClientError()
+        raise
+
+
+@register_task(
+    validator=DeleteFacilityValidator,
+    permission_classes=[IsSuperAdmin],
+    track_progress=True,
+    cancellable=False,
+    queue=facility_task_queue,
+)
+def deletefacility(facility):
+    """
+    Initiate a task to delete a facility
+    """
+    call_command(
+        "deletefacility",
+        facility=facility,
+        noninteractive=True,
+    )
+
+
+class CleanUpSyncsValidator(JobValidator):
+    pull = serializers.BooleanField(required=False)
+    push = serializers.BooleanField(required=False)
+    sync_filter = serializers.CharField(required=True)
+    client_instance_id = HexOnlyUUIDField(required=False)
+    server_instance_id = HexOnlyUUIDField(required=False)
+
+    def validate(self, data):
+        if data.get("pull") is None and data.get("push") is None:
+            raise serializers.ValidationError("Either pull or push must be specified")
+        elif data.get("pull") is data.get("push"):
+            raise serializers.ValidationError(
+                "Only one of pull or push needs to be specified"
+            )
+
+        if (
+            data.get("client_instance_id") is None
+            and data.get("server_instance_id") is None
+        ):
+            raise serializers.ValidationError(
+                "Either client_instance_id or server_instance_id must be specified"
+            )
+        elif (
+            data.get("client_instance_id") is not None
+            and data.get("server_instance_id") is not None
+        ):
+            raise serializers.ValidationError(
+                "Only one of client_instance_id or server_instance_id can be specified"
+            )
+
+        return {
+            "kwargs": data,
+        }
+
+
+@register_task(
+    validator=CleanUpSyncsValidator,
+    track_progress=False,
+    cancellable=False,
+    long_running=True,
+    status_fn=status_fn,
+)
+def cleanupsync(**kwargs):
+    # ensure arguments are valid, even outside of task API
+    validator = CleanUpSyncsValidator(data=dict(type=cleanupsync.__name__, **kwargs))
+    validator.is_valid(raise_exception=True)
+
+    sync_filter = kwargs.pop("sync_filter")
+    call_command("cleanupsyncs", sync_filter=str(sync_filter), expiration=1, **kwargs)
+
+
+@register_task(
+    job_id="cleanup_expired_deleted_users",
+    queue=facility_task_queue,
+)
+def cleanup_expired_deleted_users():
+    """
+    Delete FacilityUsers whose date_deleted is more than 30 days ago.
+    If any soft-deleted users remain, re-enqueue this task to run again in 24 hours.
+    """
+    now = timezone.now()
+    threshold = now - datetime.timedelta(days=30)
+    expired_users = FacilityUser.soft_deleted_objects.filter(
+        date_deleted__lte=threshold
+    )
+
+    expired_users.delete()
+
+    # Check if any soft-deleted users remain (regardless of date_deleted)
+    if FacilityUser.soft_deleted_objects.exists():
+        job = get_current_job()
+        # Re-enqueue to run again in 24 hours
+        job.retry_in(datetime.timedelta(days=1))
+
+
+class AssignPicturePasswordsValidator(JobValidator):
+    facility_id = serializers.PrimaryKeyRelatedField(
+        queryset=Facility.objects.all(), source="facility"
+    )
+
+    def validate(self, data):
+        facility = data["facility"]
+        return {
+            "kwargs": {"facility_id": facility.id},
+            "facility_id": facility.id,
+            "extra_metadata": dict(facility_id=facility.id),
+        }
+
+
+@register_task(
+    validator=AssignPicturePasswordsValidator,
+    track_progress=True,
+    cancellable=False,
+    permission_classes=[IsAdminForJob],
+    queue=facility_task_queue,
+)
+def assign_picture_passwords_to_facility(facility_id):
+    """
+    Bulk-assign picture passwords to all learners in a facility
+    that do not already have one.
+    """
+    facility = Facility.objects.get(id=facility_id)
+    learners = FacilityUser.objects.filter(
+        facility=facility,
+        roles__isnull=True,
+        picture_password__isnull=True,
+    ).exclude(devicepermissions__is_superuser=True)
+
+    total = get_learner_count.count(facility.dataset_id)
+    job = get_current_job()
+    if job:
+        job.update_progress(0, total)
+
+    for i, learner in enumerate(learners.iterator(), start=1):
+        try:
+            assign_picture_password(learner, facility)
+        except NoAvailableSequences:
+            if job:
+                job.update_metadata(
+                    error="No available picture password sequences remaining."
+                )
+            raise
+        if job:
+            job.update_progress(i, total)

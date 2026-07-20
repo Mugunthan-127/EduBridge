@@ -1,0 +1,201 @@
+"""
+Tests for `kolibri.utils.main` module.
+"""
+
+import os
+import unittest
+
+import pytest
+from django.conf import settings
+from django.db.utils import OperationalError
+from mock import MagicMock
+from mock import patch
+
+import kolibri
+from kolibri.utils import main
+from kolibri.utils.conf import KOLIBRI_HOME
+from kolibri.utils.version import truncate_version
+
+# from django.conf import settings
+
+
+@pytest.mark.django_db(transaction=True)
+@patch("kolibri.plugins.registry.is_initialized", return_value=False)
+@patch("kolibri.utils.main._upgrades_after_django_setup")
+@patch("kolibri.utils.main.get_version", return_value="")
+@patch("kolibri.utils.main.update")
+@patch("kolibri.core.deviceadmin.utils.dbbackup")
+def test_first_run(
+    dbbackup, update, get_version, upgrades_after_django_setup, is_initialized
+):
+    """
+    Tests that the first_run() function performs as expected
+    """
+
+    main.initialize()
+    update.assert_called_once()
+    dbbackup.assert_not_called()
+
+    # Check that it got called for each default plugin
+    from kolibri import plugins
+
+    assert set(plugins.config["INSTALLED_PLUGINS"]) == set(plugins.DEFAULT_PLUGINS)
+
+
+@pytest.mark.django_db(transaction=True)
+@patch("kolibri.plugins.registry.is_initialized", return_value=False)
+@patch("kolibri.utils.main._upgrades_after_django_setup")
+@patch("kolibri.utils.main.get_version", return_value="0.0.1")
+@patch("kolibri.utils.main.update")
+def test_update(update, get_version, upgrades_after_django_setup, is_initialized):
+    """
+    Tests that update() function performs as expected
+    """
+    main.initialize()
+    update.assert_called_once()
+
+
+@pytest.mark.django_db(transaction=True)
+@patch("kolibri.plugins.registry.is_initialized", return_value=False)
+@patch("kolibri.utils.main.get_version", return_value="0.0.1")
+def test_update_exits_if_running(get_version, is_initialized):
+    """
+    Tests that update() function performs as expected
+    """
+    with patch("kolibri.utils.main.get_status"):
+        try:
+            main.initialize()
+            pytest.fail("Update did not exit when Kolibri was already running")
+        except SystemExit:
+            pass
+
+
+@pytest.mark.django_db(transaction=True)
+def test_version_updated():
+    """
+    Tests our db backup logic: version_updated gets any change, backup gets only non-dev changes
+    """
+    assert main.version_updated("0.10.0", "0.10.1")
+    assert not main.version_updated("0.10.0", "0.10.0")
+    assert not main.should_back_up("0.10.0-dev0", "")
+    assert not main.should_back_up("0.10.0-dev0", "0.10.0")
+    assert not main.should_back_up("0.10.0", "0.10.0-dev0")
+    assert not main.should_back_up("0.10.0-dev0", "0.10.0-dev0")
+
+
+@pytest.mark.django_db(transaction=True)
+@unittest.skipIf(
+    True,
+    # TODO: rtibbles - reinstate and fix test
+    # getattr(settings, "DATABASES")["default"]["ENGINE"] != "django.db.backends.sqlite3",
+    "SQLite only test",
+)
+def test_conditional_backup():
+    import os
+
+    """
+    Tests our db backup logic: conditional_backup, remove all backups
+    """
+    from kolibri.core.deviceadmin.utils import default_backup_folder
+
+    default_path = default_backup_folder()
+    try:
+        os.rmdir(default_path)
+    except OSError:
+        pass
+    os.mkdir(default_path)
+
+    from kolibri.core.deviceadmin.utils import dbbackup
+    from kolibri.core.deviceadmin.utils import get_backup_files
+
+    # Making few backups
+    dbbackup("0.11.0")
+    dbbackup("0.11.1")
+    dbbackup("0.11.2")
+    dbbackup("0.11.3")
+    dbbackup("0.11.4")
+    dbbackup("0.13.1")
+    dbbackup("0.13.2")
+    dbbackup("0.13.3")
+    dbbackup("0.13.4")
+    dbbackup("0.13.5")
+
+    # set the version to the current version + 1
+    version = truncate_version(kolibri.__version__)
+    higher_version = [str(int(x) + 1) for x in version.split(".")]
+    higher_version = ".".join(higher_version)
+    # calling function for conditional backup
+    main.conditional_backup("0.11.1", higher_version)
+
+    backups_after = get_backup_files()
+    # checking if delete is working properly in the conditional_backup
+    assert len(backups_after) == 2
+    # ensure the db reference is also referring to a higher number
+    higher_db_version = "db-v" + higher_version
+    assert higher_db_version in backups_after[0]
+
+
+@pytest.mark.django_db(transaction=True)
+@patch("kolibri.plugins.registry.is_initialized", return_value=False)
+@patch("kolibri.utils.main._upgrades_after_django_setup")
+@patch("kolibri.utils.main.get_version", return_value=kolibri.__version__)
+@patch("kolibri.utils.main.update")
+@patch("kolibri.core.deviceadmin.utils.dbbackup")
+def test_update_no_version_change(
+    dbbackup, update, get_version, upgrades_after_django_setup, is_initialized
+):
+    """
+    Tests that when the version doesn't change, we are not doing things we
+    shouldn't
+    """
+    main.initialize()
+    update.assert_not_called()
+    dbbackup.assert_not_called()
+
+
+@pytest.mark.skipif(
+    "sqlite3" not in settings.DATABASES["default"]["ENGINE"],
+    reason="Not applicable in postgres",
+)
+@patch("kolibri.utils.main.shutil.copyfile")
+@patch("kolibri.utils.main.os.path.exists", return_value=False)
+def test_copy_preseeded_db_uses_target_basename(mock_exists, mock_copyfile):
+    """
+    Regression test: _copy_preseeded_db should derive the source filename
+    from the target path's basename (e.g. 'db.sqlite3' for the default
+    database), not from db_name + '.sqlite3' (which would be 'default.sqlite3').
+    """
+    mock_dist = MagicMock()
+    mock_dist.__file__ = os.path.join("/fake", "dist", "__init__.py")
+
+    with patch.dict("sys.modules", {"kolibri.dist": mock_dist}):
+        main._copy_preseeded_db("default")
+
+        expected_source = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__), "..", "..", "dist", "home", "db.sqlite3"
+            )
+        )
+        mock_copyfile.assert_called_once_with(
+            expected_source,
+            os.path.join(KOLIBRI_HOME, "db.sqlite3"),
+        )
+
+
+@patch("kolibri.plugins.registry.is_initialized", return_value=False)
+@patch("kolibri.utils.main._upgrades_after_django_setup")
+@patch("kolibri.utils.main._migrate_databases")
+@patch("kolibri.utils.main.version_updated")
+def test_migrate_if_unmigrated(
+    version_updated, _migrate_databases, _upgrades_after_django_setup, is_initialized
+):
+    # No matter what, ensure that version_updated returns False
+    version_updated.return_value = False
+    from morango.models import InstanceIDModel
+
+    with patch.object(
+        InstanceIDModel, "get_or_create_current_instance"
+    ) as get_or_create_current_instance:
+        get_or_create_current_instance.side_effect = OperationalError("Test")
+        main.initialize()
+        _migrate_databases.assert_called_once()

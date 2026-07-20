@@ -1,0 +1,218 @@
+name: Kolibri Build Assets for Pull Request
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  whl:
+    name: Build WHL file
+    uses: ./.github/workflows/build_whl.yml
+  pex:
+    name: Build PEX file
+    needs: whl
+    uses: ./.github/workflows/build_pex.yml
+    with:
+      whl-file-name: ${{ needs.whl.outputs.whl-file-name }}
+  dmg:
+    name: Build DMG file
+    needs: whl
+    uses: learningequality/kolibri-app/.github/workflows/build_mac.yml@v0.5.1
+    with:
+      whl-file-name: ${{ needs.whl.outputs.whl-file-name }}
+      ref: v0.5.1
+  deb:
+    name: Build DEB file
+    needs: whl
+    uses: learningequality/kolibri-installer-debian/.github/workflows/build_deb.yml@v0.18.0
+    with:
+      tar-file-name: ${{ needs.whl.outputs.tar-file-name }}
+      ref: v0.16.1
+  server_deb:
+    name: Build kolibri-server DEB file
+    needs: whl
+    uses: ./.github/workflows/platform-debian-server-build_deb.yml
+    with:
+      tar-file-name: ${{ needs.whl.outputs.tar-file-name }}
+  exe:
+    name: Build EXE file
+    needs: whl
+    uses: learningequality/kolibri-installer-windows/.github/workflows/build_exe.yml@v1.6.9
+    with:
+      whl-file-name: ${{ needs.whl.outputs.whl-file-name }}
+      ref: v1.6.9
+  apk:
+    name: Build APK file
+    needs: whl
+    uses: learningequality/kolibri-installer-android/.github/workflows/build_apk.yml@v0.2.0
+    with:
+      tar-file-name: ${{ needs.whl.outputs.tar-file-name }}
+      ref: v0.2.0
+  zip:
+    name: Build Raspberry Pi Image
+    needs: [deb, server_deb]
+    uses: ./.github/workflows/platform-pi-build_img.yml
+    with:
+      deb-file-name: ${{ needs.deb.outputs.deb-file-name }}
+      server-deb-file-name: ${{ needs.server_deb.outputs.deb-file-name }}
+  pi_smoke_test:
+    name: Pi image smoke test
+    needs: zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - name: Download zip artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.zip.outputs.zip-file-name }}
+          path: dist
+      - name: Verify image WiFi configuration
+        run: sudo ./platforms/raspberry-pi/smoke-test-wifi.sh dist/*.zip
+  server_smoke_test:
+    name: kolibri-server serving smoke test
+    needs: [deb, server_deb]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Single source for the served port: preseeded into debconf below and read
+      # by serving_smoke_test.sh (via $KOLIBRI_SERVER_PORT) when it curls nginx.
+      KOLIBRI_SERVER_PORT: "8080"
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - name: Download the Kolibri deb
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.deb.outputs.deb-file-name }}
+          path: debs
+      - name: Download the kolibri-server deb
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.server_deb.outputs.deb-file-name }}
+          path: debs
+      - name: Preseed debconf selections
+        run: |
+          echo "kolibri kolibri/init boolean false" | sudo debconf-set-selections
+          echo "kolibri kolibri/user string kolibri" | sudo debconf-set-selections
+          echo "kolibri-server kolibri-server/port select ${KOLIBRI_SERVER_PORT}" | sudo debconf-set-selections
+          echo "kolibri-server kolibri-server/zip_content_port select 8081" | sudo debconf-set-selections
+      - name: Install the Kolibri and kolibri-server debs
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            "./debs/${{ needs.deb.outputs.deb-file-name }}" \
+            "./debs/${{ needs.server_deb.outputs.deb-file-name }}"
+      - name: Start kolibri-server
+        run: sudo service kolibri-server restart
+      - name: Assert Kolibri is served through nginx
+        run: ./platforms/debian-server/tests/serving_smoke_test.sh
+      - name: Dump service logs on failure
+        if: failure()
+        run: |
+          sudo journalctl -u kolibri-server --no-pager || true
+          sudo journalctl -u nginx --no-pager || true
+          sudo cat /home/kolibri/.kolibri/logs/uwsgi.log 2>/dev/null || true
+  browser_smoke_test:
+    name: Browser smoke test
+    needs: whl
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.whl.outputs.whl-file-name }}
+          path: dist
+      - name: Install WHL file
+        run: pip install dist/${{ needs.whl.outputs.whl-file-name }}
+      - name: Install Playwright
+        run: |
+          pip install "playwright<2"
+          playwright install --with-deps chromium
+      - name: Run browser smoke test
+        env:
+          KOLIBRI_HOME: ${{ runner.temp }}/kolibri_home
+          SCREENSHOT_PATH: ${{ runner.temp }}/smoke_test_screenshot.png
+        working-directory: ${{ runner.temp }}
+        run: python ${{ github.workspace }}/integration_testing/smoke_test.py
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke_test_screenshot
+          path: ${{ runner.temp }}/smoke_test_screenshot.png
+          if-no-files-found: ignore
+  test_whl_file:
+    name: Test WHL file with uv-supported Python versions
+    needs: whl
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+        cext: [true, false]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-python: true
+      - name: Install Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.whl.outputs.whl-file-name }}
+          path: dist
+      # Seed the venv with real pip so the wheel is installed via pip itself
+      # (not `uv pip`), exercising the install path end users actually follow.
+      - name: Create virtual environment with pip
+        run: uv venv --seed --python ${{ matrix.python-version }}
+      - name: Install WHL file
+        run: .venv/bin/pip install dist/${{ needs.whl.outputs.whl-file-name }}
+      - name: Smoke test WHL file
+        env:
+          KOLIBRI_NO_C_EXTENSIONS: ${{ matrix.cext == false && '1' || '' }}
+        run: .venv/bin/kolibri configure setup
+  test_whl_file_no_uv:
+    name: Test WHL file with Python versions without uv support
+    needs: whl
+    strategy:
+      matrix:
+        python-version: [3.6, 3.7]
+        cext: [true, false]
+    runs-on: ubuntu-latest
+    container:
+      image: python:${{ matrix.python-version }}-buster
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.whl.outputs.whl-file-name }}
+          path: dist
+      - name: Install WHL file
+        run: pip install dist/${{ needs.whl.outputs.whl-file-name }}
+      - name: Smoke test WHL file
+        env:
+          KOLIBRI_NO_C_EXTENSIONS: ${{ matrix.cext == false && '1' || '' }}
+        run: kolibri configure setup
+  # Single stable check for branch protection. Gate on this one job so matrix
+  # or implementation changes in the smoke tests don't require updating the
+  # required-checks list in branch protection.
+  smoke_tests:
+    name: WHL smoke tests
+    needs:
+      - whl
+      - browser_smoke_test
+      - test_whl_file
+      - test_whl_file_no_uv
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any needed job failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

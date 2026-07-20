@@ -1,0 +1,142 @@
+<template>
+
+  <div>
+    <h2
+      v-if="Object.keys(availableLearningActivities).length > 0"
+      class="title"
+    >
+      {{ $tr('activities') }}
+    </h2>
+    <div class="wrapper">
+      <span
+        v-for="(key, activity) in availableLearningActivities"
+        :key="key"
+        alignment="center"
+      >
+        <KButton
+          appearance="flat-button"
+          :appearanceOverrides="
+            isKeyActive(key) ? { ...activityStyles, ...activityActiveStyles } : activityStyles
+          "
+          :disabled="
+            searchLoading || (availableActivities && !availableActivities[key] && !isKeyActive(key))
+          "
+          @click="$emit('input', key)"
+        >
+          <KIcon
+            :icon="activityIcon(activity)"
+            class="activity-icon"
+          />
+          <p class="activity-button-text">
+            {{ coreString(camelCase(activity)) }}
+          </p>
+        </KButton>
+      </span>
+    </div>
+  </div>
+
+</template>
+
+
+<script>
+
+  import camelCase from 'lodash/camelCase';
+
+  import commonCoreStrings from 'kolibri/uiText/commonCoreStrings';
+  import { injectBaseSearch } from 'kolibri-common/composables/useBaseSearch';
+
+  export default {
+    name: 'ActivityButtonsGroup',
+    mixins: [commonCoreStrings],
+    setup() {
+      const { availableLearningActivities, searchableLabels, activeSearchTerms, searchLoading } =
+        injectBaseSearch();
+      return {
+        availableLearningActivities,
+        searchableLabels,
+        activeSearchTerms,
+        searchLoading,
+      };
+    },
+    computed: {
+      activityStyles() {
+        return {
+          color: this.$themeTokens.text,
+          width: '120px',
+          height: '120px',
+          border: '2px solid transparent',
+          textTransform: 'capitalize',
+          fontWeight: 'normal',
+          transition: 'none',
+          ':hover': this.activityActiveStyles,
+        };
+      },
+      activityActiveStyles() {
+        return {
+          backgroundColor: this.$themeBrand.primary.v_100,
+          border: '2px',
+          borderColor: this.$themeTokens.primary,
+          borderStyle: 'solid',
+          borderRadius: '4px',
+        };
+      },
+      availableActivities() {
+        if (this.searchableLabels) {
+          const activities = {};
+          for (const key of this.searchableLabels.learning_activities) {
+            activities[key] = true;
+          }
+          return activities;
+        }
+        return null;
+      },
+      activeKeys() {
+        return Object.keys(
+          (this.activeSearchTerms && this.activeSearchTerms.learning_activities) || {},
+        );
+      },
+    },
+    methods: {
+      camelCase(id) {
+        return camelCase(id);
+      },
+      activityIcon(activity) {
+        if (activity == 'EXPLORE') {
+          return 'interactShaded';
+        } else {
+          return `${camelCase(activity) + 'Shaded'}`;
+        }
+      },
+      isKeyActive(key) {
+        return key !== null && !!this.activeKeys.filter(k => k.includes(key)).length;
+      },
+    },
+    $trs: {
+      activities: {
+        message: 'Activities',
+        context: 'Section header label in the Library page sidebar.',
+      },
+    },
+  };
+
+</script>
+
+
+<style lang="scss" scoped>
+
+  .activity-icon {
+    width: 34px;
+    height: 34px;
+  }
+
+  .activity-button-text {
+    margin: auto;
+    margin-top: -12px;
+  }
+
+  .wrapper {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  }
+
+</style>

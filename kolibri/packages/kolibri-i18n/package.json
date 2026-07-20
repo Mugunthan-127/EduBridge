@@ -1,0 +1,51 @@
+{
+  "name": "kolibri-i18n",
+  "version": "1.0.0",
+  "description": "Internationalization tools for Kolibri",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/learningequality/kolibri.git",
+    "directory": "packages/kolibri-i18n"
+  },
+  "author": "Learning Equality",
+  "license": "MIT",
+  "private": false,
+  "main": "src/index.js",
+  "bin": {
+    "kolibri-i18n": "./src/cli.js"
+  },
+  "scripts": {
+    "prepack": "node ./build_kolibri_i18n.js"
+  },
+  "dependencies": {
+    "ast-traverse": "^0.1.1",
+    "cli-table": "^0.3.11",
+    "commander": "^15.0.0",
+    "csv-parse": "^7.0.0",
+    "csv-writer": "^1.3.0",
+    "del": "^6.1.1",
+    "enhanced-resolve": "^5.20.1",
+    "ini": "^6.0.0",
+    "kolibri-build": "workspace:*",
+    "kolibri-format": "workspace:*",
+    "kolibri-glob": "workspace:*",
+    "kolibri-logging": "workspace:*",
+    "lodash": "catalog:",
+    "recast": "^0.23.11",
+    "smol-toml": "^1.6.1",
+    "smol-toml": "^1.6.1",
+    "vue-sfc-descriptor-to-string": "1.0.0"
+  },
+  "peerDependencies": {
+    "vue-template-compiler": "2.7.16",
+    "webpack": "^5.102.0"
+  },
+  "devDependencies": {
+    "kolibri": "workspace:*",
+    "rewire": "^6.0.0"
+  },
+  "engines": {
+    "node": ">= 20.19.0",
+    "npm": ">= 8"
+  }
+}

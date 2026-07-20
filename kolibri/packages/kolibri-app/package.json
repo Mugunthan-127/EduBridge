@@ -1,0 +1,19 @@
+{
+  "name": "kolibri-app",
+  "version": "1.0.2",
+  "description": "The Kolibri app",
+  "main": "src/index.js",
+  "author": "Learning Equality",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/learningequality/kolibri.git",
+    "directory": "packages/kolibri-app"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "kolibri": "workspace:*",
+    "kolibri-logging": "workspace:*",
+    "kolibri-module": "workspace:*",
+    "vue": "catalog:"
+  }
+}

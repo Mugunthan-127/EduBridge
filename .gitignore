@@ -1,0 +1,61 @@
+# ── Node / Frontend ──────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log
+yarn-error.log
+lerna-debug.log
+dist/
+dist-packages-temp/
+dist-packages-cache/
+build/
+js-dist/
+
+# ── Python / Backend ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.env
+.env.local
+.python-version
+
+# ── Test / Coverage ──────────────────────────────────────────────────────────
+.coverage*
+.tox/
+htmlcov/
+.pytest_cache/
+coverage/
+
+# ── IDEs ─────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.iml
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Icon
+
+# ── Kolibri specific ─────────────────────────────────────────────────────────
+kolibri/kolibri/_version.py
+kolibri/kolibri/VERSION
+kolibri/.kolibri_home/
+kolibri/.pytest_kolibri_home/
+kolibri/storage/
+kolibri/kolibri/content/content_db/*.sqlite3
+kolibri/build_tools/crowdin-cli.jar
+kolibri/SQLITE_MAX_VARIABLE_NUMBER.cache
+kolibri/.cext_cache/
+kolibri/kolibri/**/build/
+kolibri/kolibri/**/static/*.gz
+
+# ── Docs build ───────────────────────────────────────────────────────────────
+docs/_build/
+
+# ── Temp / Lock caches ───────────────────────────────────────────────────────
+*.swp
+*.file_size

@@ -1,0 +1,51 @@
+{# Copyright 2023 Endless OS Foundation, LLC #}
+{# SPDX-License-Identifier: MIT #}
+{% load i18n %}
+{% load staticfiles %}
+{% get_current_language_bidi as LANGUAGE_BIDI %}
+{% get_current_language as LANGUAGE_CODE %}
+{
+  "name": "{% site_title|escapejs %}",
+  "short_name": "{% site_title|escapejs %}",
+  "dir": "{{ LANGUAGE_BIDI|yesno:'rtl,ltr'|escapejs }}",
+  "lang": "{{ LANGUAGE_CODE|escapejs }}",
+  "icons": [
+{% for icon in icons %}
+    {
+{% if icon.type %}
+      "type": "{{ icon.type|escapejs }}",
+{% endif %}
+{% if icon.sizes %}
+      "sizes": "{{ icon.sizes|escapejs }}",
+{% endif %}
+{% if icon.label %}
+      "label": "{{ icon.label|escapejs }}",
+{% endif %}
+{% if icon.purpose %}
+      "purpose": "{{ icon.purpose|escapejs }}",
+{% endif %}
+      "src": "{{ icon.src|escapejs }}"
+    }{% if not forloop.last %},{% endif %}
+{% endfor %}
+  ],
+  "related_applications": [
+{% for app in related_applications %}
+    {
+      "platform": "{{ app.platform|escapejs }}",
+      "id": "{{ app.id|escapejs }}",
+      "url": "{{ app.url|escapejs }}"
+    }{% if not forloop.last %},{% endif %}
+{% endfor %}
+  ],
+{% if prefer_related_applications %}
+  "prefer_related_applications": true,
+{% endif %}
+  "id": "{{ id|escapejs }}",
+  "start_url": "{% url 'kolibri:core:root_redirect'|escapejs %}",
+  "background_color": "{{ background_color|escapejs }}",
+{% if theme_color %}
+  "theme_color": "{{ theme_color|escapejs }}",
+{% endif %}
+  "display": "standalone",
+  "scope": "{{ id|escapejs }}"
+}

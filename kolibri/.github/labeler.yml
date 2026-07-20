@@ -1,0 +1,44 @@
+'APP: Coach':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: kolibri/plugins/coach/**/*
+'APP: Device':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: kolibri/plugins/device/**/*
+'APP: Facility':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: kolibri/plugins/facility/**/*
+'APP: Learn':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: kolibri/plugins/learn/**/*
+'APP: Setup Wizard':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: kolibri/plugins/setup_wizard/**/*
+'APP: User':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: kolibri/plugins/user_*/**/*
+'DEV: backend':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: '**/*.py'
+'DEV: frontend':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: ['kolibri/**/*.js', 'kolibri/**/*.vue']
+'DEV: dev-ops':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: '.github/workflows**/*'
+'DEV: tools':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: ['packages/eslint-plugin-kolibri/**/*', 'packages/browserslist-config-kolibri/**/*']
+'DEV: renderers':
+  - any:
+      - changed-files:
+          - any-glob-to-any-file: ['kolibri/plugins/*viewer/**/*', 'kolibri/plugins/*player/**/*']

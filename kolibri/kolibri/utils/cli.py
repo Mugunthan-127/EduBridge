@@ -1,0 +1,648 @@
+import logging
+import os
+import signal
+import sys
+import traceback
+from contextlib import contextmanager
+
+import click
+from django.core.management import execute_from_command_line
+
+import kolibri
+
+try:
+    from kolibri.plugins import config
+except RuntimeError as e:
+    logging.error("Loading plugin configuration failed with error '{}'".format(e))
+    sys.exit(1)
+from kolibri.plugins.utils import disable_all_plugins
+from kolibri.plugins.utils import disable_plugins
+from kolibri.plugins.utils import enable_default_plugins
+from kolibri.plugins.utils import enable_plugins
+from kolibri.plugins.utils import iterate_plugins
+from kolibri.utils import server
+from kolibri.utils.conf import OPTIONS
+from kolibri.utils.constants import installation_types
+from kolibri.utils.debian_check import check_debian_user
+from kolibri.utils.main import initialize
+from kolibri.utils.main import set_django_settings_and_python_path
+from kolibri.utils.main import setup_logging
+from kolibri.utils.modules import module_exists
+from kolibri.utils.plugin_scaffold import BACKEND_ONLY
+from kolibri.utils.plugin_scaffold import MODE_CHOICES
+from kolibri.utils.plugin_scaffold import MODE_PACKAGE
+from kolibri.utils.plugin_scaffold import scaffold_plugin
+from kolibri.utils.plugin_scaffold import SURFACE_CHOICES
+
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _patch_python_path(pythonpath):
+    if pythonpath:
+        sys.path.insert(0, pythonpath)
+    try:
+        yield
+    finally:
+        if pythonpath:
+            sys.path.remove(pythonpath)
+
+
+def validate_module(ctx, param, value):
+    if value:
+        with _patch_python_path(ctx.params.get("pythonpath")):
+            if not module_exists(value):
+                raise click.BadParameter(
+                    "{param} must be a valid python module import path"
+                )
+    return value
+
+
+debug_option = click.Option(
+    param_decls=["--debug"],
+    default=False,
+    is_flag=True,
+    help="Display and log debug messages (for development)",
+    envvar="KOLIBRI_DEBUG",
+)
+
+debug_database_option = click.Option(
+    param_decls=["--debug-database"],
+    default=False,
+    is_flag=True,
+    help="Display and log database queries (for development), very noisy!",
+    envvar="KOLIBRI_DEBUG_LOG_DATABASE",
+)
+
+settings_option = click.Option(
+    param_decls=["--settings"],
+    callback=validate_module,
+    help="Django settings module path",
+)
+
+pythonpath_option = click.Option(
+    param_decls=["--pythonpath"],
+    type=click.Path(exists=True, file_okay=False, resolve_path=True),
+    help="Add a path to the Python path",
+    # Set this to is_eager to ensure the option is set
+    # before we attempt to import the settings module
+    is_eager=True,
+)
+
+skip_update_option = click.Option(
+    param_decls=["--skip-update"],
+    default=False,
+    is_flag=True,
+    help="Do not run update logic. (Useful when running multiple Kolibri commands in parallel)",
+)
+
+noinput_option = click.Option(
+    param_decls=["--no-input"],
+    default=False,
+    is_flag=True,
+    help="Suppress user prompts",
+)
+
+
+base_params = [debug_option, debug_database_option, noinput_option, pythonpath_option]
+
+initialize_params = base_params + [
+    settings_option,
+    skip_update_option,
+]
+
+initialize_kwargs = {param.name: param.default for param in initialize_params}
+
+
+def get_initialize_params():
+    try:
+        return {
+            k: v
+            for k, v in click.get_current_context().params.items()
+            if k in initialize_kwargs
+        }
+    except RuntimeError:
+        return initialize_kwargs
+
+
+class KolibriCommand(click.Command):
+    """
+    A command class for basic Kolibri commands that do not require
+    the django stack. By default adds a debug param for logging purposes
+    also invokes setup_logging before invoking the command.
+    """
+
+    allow_extra_args = True
+
+    def __init__(self, *args, **kwargs):
+        kwargs["params"] = base_params + (
+            kwargs["params"] if "params" in kwargs else []
+        )
+        super().__init__(*args, **kwargs)
+
+    def invoke(self, ctx):
+        # Check if the current user is the kolibri user when running kolibri from Debian installer.
+        check_debian_user(ctx.params.get("no_input"))
+        setup_logging(
+            debug=ctx.params.get("debug"),
+            debug_database=ctx.params.get("debug_database"),
+        )
+        # We want to allow overriding the Python path for commands that don't require Django
+        set_django_settings_and_python_path(None, ctx.params.get("pythonpath"))
+        for param in base_params:
+            ctx.params.pop(param.name)
+        return super().invoke(ctx)
+
+
+class KolibriGroupCommand(click.Group):
+    """
+    A command class for Kolibri commands that do not require
+    the django stack, but have subcommands. By default adds
+    a debug param for logging purposes
+    also invokes setup_logging before invoking the command.
+    """
+
+    allow_extra_args = True
+
+    def __init__(self, *args, **kwargs):
+        kwargs["params"] = base_params + (
+            kwargs["params"] if "params" in kwargs else []
+        )
+        super().__init__(*args, **kwargs)
+
+    def invoke(self, ctx):
+        # Check if the current user is the kolibri user when running kolibri from Debian installer.
+        check_debian_user(ctx.params.get("no_input"))
+        setup_logging(
+            debug=ctx.params.get("debug"),
+            debug_database=ctx.params.get("debug_database"),
+        )
+        # We want to allow overriding the Python path for commands that don't require Django
+        set_django_settings_and_python_path(None, ctx.params.get("pythonpath"))
+        for param in base_params:
+            ctx.params.pop(param.name)
+        return super().invoke(ctx)
+
+
+class KolibriDjangoCommand(click.Command):
+    """
+    A command class for Kolibri commands that do require
+    the django stack. By default adds all params needed for
+    the initialize function, calls the initialize function and
+    also invokes setup_logging before invoking the command.
+    """
+
+    allow_extra_args = True
+
+    def __init__(self, *args, **kwargs):
+        kwargs["params"] = initialize_params + (
+            kwargs["params"] if "params" in kwargs else []
+        )
+        super().__init__(*args, **kwargs)
+
+    def invoke(self, ctx):
+        try:
+            initialize(**get_initialize_params())
+        except Exception:
+            raise click.ClickException(traceback.format_exc())
+
+        # Remove parameters that are not for Django management command
+        for param in initialize_params:
+            ctx.params.pop(param.name)
+        return super().invoke(ctx)
+
+
+main_help = """Kolibri command-line utility
+
+Details for each main command: kolibri COMMAND --help
+
+List of additional management commands: kolibri manage help
+
+For more information, see: https://kolibri.readthedocs.io/
+"""
+
+
+@click.group(invoke_without_command=True, help=main_help)
+@click.pass_context
+@click.version_option(version=kolibri.__version__)
+def main(ctx):
+    """
+    Kolibri's main function.
+
+    Utility functions should be callable for unit testing purposes, but remember
+    to use main() for integration tests in order to test the argument API.
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit(1)
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+    except ValueError:
+        pass
+
+
+@main.command(cls=KolibriDjangoCommand, help="Start the Kolibri process")
+@click.option(
+    "--port",
+    default=None,
+    type=int,
+    help="Port on which Kolibri is being served",
+)
+@click.option(
+    "--zip-port",
+    default=None,
+    type=int,
+    help="Port on which zip content server is being served",
+)
+@click.option(
+    "--background/--foreground",
+    default=True,
+    help="Run Kolibri as a background process",
+)
+def start(port, zip_port, background):
+    """
+    Start the server on given port.
+    """
+    port = OPTIONS["Deployment"]["HTTP_PORT"] if port is None else port
+    zip_port = (
+        OPTIONS["Deployment"]["ZIP_CONTENT_PORT"] if zip_port is None else zip_port
+    )
+    try:
+        server.start(
+            port=port,
+            zip_port=zip_port,
+            serve_http=OPTIONS["Server"]["CHERRYPY_START"],
+            background=background,
+        )
+    except server.PortOccupied:
+        sys.exit(1)
+
+
+@main.command(cls=KolibriCommand, help="Stop the Kolibri process")
+def stop():
+    """
+    Stops the server unless it isn't running
+    """
+    try:
+        server.get_status()
+    except server.NotRunning as e:
+        if e.status_code == server.STATUS_STOPPED:
+            logging.info(
+                "Already stopped: {}".format(
+                    server.status_messages[server.STATUS_STOPPED]
+                )
+            )
+            sys.exit(0)
+    status = server.stop()
+    if status == server.STATUS_STOPPED:
+        if OPTIONS["Server"]["CHERRYPY_START"]:
+            logger.info("Kolibri server has successfully been stopped.")
+        else:
+            logger.info("Kolibri background services have successfully been stopped.")
+        sys.exit(0)
+    sys.exit(status)
+
+
+@main.command(cls=KolibriCommand, help="Show the status of the Kolibri process")
+def status():
+    """
+    How is Kolibri doing?
+    Check the server's status. For possible statuses, see the status dictionary
+    server.status_messages
+
+    Status *always* outputs the current status in the first line of stderr.
+    The following lines contain optional information such as the addresses where
+    the server is listening.
+
+    TODO: We can't guarantee the above behavior because of the django stack
+    being loaded regardless
+
+    Exits with status_code, key has description in server.status_messages
+    """
+    status_code, urls = server.get_urls()
+
+    if status_code == server.STATUS_RUNNING:
+        sys.stderr.write("{msg:s} (0)\n".format(msg=server.status_messages[0]))
+        if urls:
+            sys.stderr.write("Kolibri running on:\n\n")
+            for addr in urls:
+                sys.stderr.write("\t{}\n".format(addr))
+    else:
+        verbose_status = server.status_messages[status_code]
+        sys.stderr.write(
+            "{msg:s} ({code:d})\n".format(code=status_code, msg=verbose_status)
+        )
+    sys.exit(status_code)
+
+
+@main.command(cls=KolibriDjangoCommand, help="Start worker processes")
+@click.option(
+    "--port",
+    default=None,
+    type=int,
+    help="Port on which Kolibri is running to inform services",
+)
+@click.option(
+    "--background/--foreground",
+    default=True,
+    help="Run Kolibri services as a background task",
+)
+def services(port, background):
+    """
+    Start the kolibri background services.
+    """
+
+    port = OPTIONS["Deployment"]["HTTP_PORT"] if port is None else port
+
+    logger.info("Starting Kolibri background services")
+    try:
+        server.start(port=port, zip_port=0, serve_http=False, background=background)
+    except server.PortOccupied:
+        sys.exit(1)
+
+
+@main.command(cls=KolibriCommand, help="Restart the Kolibri process")
+def restart():
+    """
+    Restarts the server if it is running
+    """
+    if server.restart_and_wait():
+        logger.info("Kolibri has successfully restarted")
+        sys.exit(0)
+    logger.info("Kolibri has failed to restart - confirm that the server is running")
+    sys.exit(1)
+
+
+@main.command(
+    cls=KolibriDjangoCommand,
+    context_settings=dict(ignore_unknown_options=True, allow_extra_args=True),
+    help="Django management commands. See also 'kolibri manage help'",
+)
+@click.pass_context
+def manage(ctx):
+    if ctx.args:
+        logger.info("Invoking command {}".format(" ".join(ctx.args)))
+    execute_from_command_line(["kolibri manage"] + ctx.args)
+
+
+@main.command(cls=KolibriDjangoCommand, help="Launch a Django shell")
+@click.pass_context
+def shell(ctx):
+    execute_from_command_line(["kolibri manage", "shell"] + ctx.args)
+
+
+@main.command(cls=KolibriGroupCommand, help="Manage Kolibri plugins")
+def plugin():
+    pass
+
+
+def generate_pex_error():
+    """
+    Format plugin error message with additional context for PEX installations.
+    """
+    if "PEX_INHERIT_PATH" in os.environ and (
+        os.environ["PEX_INHERIT_PATH"] == "fallback"
+        or os.environ["PEX_INHERIT_PATH"] == "prefer"
+    ):
+        return ""
+
+    # Add PEX-specific help if running from PEX
+    current_installation = server.installation_type()
+    if (
+        current_installation
+        and installation_types.PEX.lower() in current_installation.lower()
+    ):
+        return (
+            "\n\nYou are running Kolibri from a PEX file. "
+            "To use externally-installed plugins with PEX, you must set the "
+            "PEX_INHERIT_PATH environment variable:\n\n"
+            "    PEX_INHERIT_PATH=fallback python kolibri.pex start\n\n"
+            "This allows the PEX file to access plugins installed in the system Python path."
+        )
+
+    return ""
+
+
+@plugin.command(cls=KolibriCommand, help="Enable Kolibri plugins")
+@click.argument("plugin_names", nargs=-1)
+@click.option("-d", "--default-plugins", default=False, is_flag=True)
+def enable(plugin_names, default_plugins):
+    if not plugin_names and default_plugins:
+        error = enable_default_plugins()
+    else:
+        error = enable_plugins(plugin_names)
+    if error:
+        exception = click.ClickException(
+            "One or more plugins could not be enabled" + generate_pex_error()
+        )
+        exception.exit_code = 2
+        raise exception
+
+
+@plugin.command(cls=KolibriCommand, help="Disable Kolibri plugins")
+@click.argument("plugin_names", nargs=-1)
+@click.option("-a", "--all-plugins", default=False, is_flag=True)
+def disable(plugin_names, all_plugins):
+    if not plugin_names and all_plugins:
+        error = disable_all_plugins()
+    else:
+        error = disable_plugins(plugin_names)
+    if error:
+        exception = click.ClickException("One or more plugins could not be disabled")
+        exception.exit_code = 2
+        raise exception
+
+
+@plugin.command(
+    cls=KolibriCommand, help="Set Kolibri plugins to be enabled and disable all others"
+)
+@click.argument("plugin_names", nargs=-1)
+def apply(plugin_names):
+    to_be_disabled = set(config.ACTIVE_PLUGINS) - set(plugin_names)
+    error = disable_plugins(to_be_disabled)
+    error = enable_plugins(plugin_names) or error
+    if error:
+        exception = click.ClickException(
+            "An error occurred applying the plugin configuration" + generate_pex_error()
+        )
+        exception.exit_code = 2
+        raise exception
+
+
+@plugin.command(cls=KolibriCommand, help="List all available Kolibri plugins")
+def list():
+    plugins = [plugin for plugin in iterate_plugins()]
+    lang = "en"
+    max_name_len = max((len(plugin.name(lang)) for plugin in plugins))
+    max_module_path_len = max((len(plugin.module_path) for plugin in plugins))
+    available_plugins = "Available plugins"
+    plugin_id = "Plugin identifier"
+    status = "Status"
+    click.echo(
+        available_plugins
+        + " " * (max_name_len - len(available_plugins) + 4)
+        + plugin_id
+        + " " * (max_module_path_len - len(plugin_id) + 4)
+        + status
+    )
+    for plugin in sorted(plugins, key=lambda x: x.module_path):
+        click.echo(
+            plugin.name(lang)
+            + " " * (max_name_len - len(plugin.name(lang)) + 4)
+            + plugin.module_path
+            + " " * (max_module_path_len - len(plugin.module_path) + 4)
+            + ("ENABLED" if plugin.enabled else "DISABLED")
+        )
+
+
+class ScaffoldCommand(KolibriCommand):
+    """
+    ``KolibriCommand`` variant that honours ``--no-input`` for the scaffold's
+    option prompts. click resolves ``prompt=`` options during argument parsing;
+    when ``--no-input`` is set we disable those prompts so a missing required
+    value produces a clear "Missing option" error instead of blocking on an
+    interactive prompt.
+    """
+
+    def parse_args(self, ctx, args):
+        if "--no-input" in args:
+            saved = [
+                (p, p.prompt)
+                for p in self.get_params(ctx)
+                if getattr(p, "prompt", None)
+            ]
+            for param, _ in saved:
+                param.prompt = None
+            try:
+                return super().parse_args(ctx, args)
+            finally:
+                for param, prompt in saved:
+                    param.prompt = prompt
+        return super().parse_args(ctx, args)
+
+
+@plugin.command(cls=ScaffoldCommand, help="Scaffold a new Kolibri plugin")
+@click.option(
+    "--name",
+    prompt="Plugin name",
+    required=True,
+    help='Human-readable plugin name, e.g. "My Thing"',
+)
+@click.option(
+    "--target-dir",
+    "target_dir",
+    prompt="Parent directory to create the plugin folder in",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Parent directory the plugin folder is created inside",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(MODE_CHOICES),
+    prompt="Plugin mode",
+    default=MODE_PACKAGE,
+    help=(
+        "package: a self-contained package with its own pyproject.toml (default); "
+        "module: a bare module registered in the nearest enclosing pyproject.toml"
+    ),
+)
+@click.option(
+    "--surface",
+    type=click.Choice(SURFACE_CHOICES),
+    prompt="Plugin surface",
+    default=BACKEND_ONLY,
+    help="Plugin surface to generate",
+)
+@click.option(
+    "--description", prompt="Description", default="", help="Plugin description"
+)
+@click.option("--author", prompt="Author", required=True, help="Plugin author")
+@click.option(
+    "--email", prompt="Author email", required=True, help="Plugin author email"
+)
+@click.option(
+    "--url-slug",
+    "url_slug",
+    default=None,
+    help="URL slug for the single-page-app surface (defaults to the plugin name)",
+)
+def create(name, target_dir, mode, surface, description, author, email, url_slug):
+    # Expand ``~`` and environment variables so a prompted or flagged path like
+    # ``~/plugins`` resolves rather than creating a literal ``~`` directory.
+    target_dir = os.path.expanduser(os.path.expandvars(target_dir))
+    if not description:
+        description = "{} plugin for Kolibri".format(name)
+
+    try:
+        result = scaffold_plugin(
+            name,
+            target_dir,
+            mode,
+            surface,
+            description,
+            author,
+            email,
+            url_slug=url_slug,
+        )
+    except (FileExistsError, LookupError, ValueError) as e:
+        exception = click.ClickException(str(e))
+        exception.exit_code = 2
+        raise exception
+
+    click.echo("Created {} plugin at {}".format(surface, result.plugin_root))
+    for path in result.files_written:
+        click.echo("  {}".format(path))
+    if result.registration_note:
+        click.echo(result.registration_note)
+
+
+@main.command(cls=KolibriGroupCommand, help="Configure Kolibri and enabled plugins")
+def configure():
+    pass
+
+
+def _format_env_var(envvar, value):
+    if value.get("deprecated", False) or envvar in value.get("deprecated_envvars", ()):
+        return click.style(
+            "{envvar} - DEPRECATED - {description}\n\n".format(
+                envvar=envvar, description=value.get("description", "")
+            ),
+            fg="yellow",
+        )
+    return "{envvar} - {description}\n\n".format(
+        envvar=envvar, description=value.get("description", "")
+    )
+
+
+def _get_env_vars():
+    """
+    Generator to iterate over all environment variables
+    """
+    from kolibri.utils.env import ENVIRONMENT_VARIABLES
+
+    for key, value in ENVIRONMENT_VARIABLES.items():
+        yield _format_env_var(key, value)
+
+    from kolibri.utils.options import option_spec
+
+    for value in option_spec.values():
+        for v in value.values():
+            if "envvars" in v:
+                for envvar in v["envvars"]:
+                    yield _format_env_var(envvar, v)
+
+
+@configure.command(
+    cls=KolibriCommand,
+    help="List all available environment variables to configure Kolibri",
+)
+def list_env():
+    click.echo_via_pager(_get_env_vars())
+
+
+@configure.command(cls=KolibriDjangoCommand, help="Setup Kolibri")
+def setup():
+    """
+    Setup Kolibri.
+    """
+    logger.info("Kolibri has successfully been setup")

@@ -1,0 +1,14 @@
+{
+  "name": "browserslist-config-kolibri",
+  "version": "0.20.0",
+  "description": "Browsers list configuration for Kolibri",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/learningequality/kolibri.git",
+    "directory": "packages/browserslist-config-kolibri"
+  },
+  "author": "Learning Equality",
+  "license": "MIT",
+  "private": false
+}

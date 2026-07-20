@@ -1,0 +1,130 @@
+Single-page Apps
+================
+
+The Kolibri frontend is made of a few high-level "app" plugins, which are single-page JS applications (conventionally *app.js*) with their own base URL and a single root Vue.js component. Examples of apps are 'Learn' and 'User Management'. Apps are independent of each other, and can only reference components and styles from within themselves and from core.
+
+Each app is implemented as a Kolibri plugin (see :doc:`/backend_architecture/plugins`), and is defined in a subdirectory of *kolibri/plugins*.
+
+On the Server-side, the ``kolibri_plugin.py`` file describes most of the configuration for the single-page app. In particular, this includes the base Django HTML template to return (with an empty ``<body>``), the URL at which the app is exposed, and the javascript entry file which is run on load.
+
+On the client-side, the app creates a single ``KolibriModule`` object in the entry file (conventionally *app.js*) and registers this with the core app, a global variable called ``kolibriCoreAppGlobal``. The Kolibri Module then mounts single root component to the HTML returned by the server, which recursively contains all additional components, html and logic.
+
+Defining a new Kolibri module
+-----------------------------
+
+.. note::
+
+  This section is mostly relevant if you are creating a new app or plugin. If you are just creating new components, you don't need to do this.
+
+A Kolibri Module is initially defined in Python by sub-classing the ``WebpackBundleHook`` class (in ``kolibri.core.webpack.hooks``). The hook defines the JS entry point (conventionally called *app.js*) where the ``KolibriModule`` subclass is instantiated, and where events and callbacks on the module are registered. These are defined in the ``events`` and ``once`` properties. Each defines key-value pairs of the name of an event, and the name of the method on the ``KolibriModule`` object. When these events are triggered on the Kolibri core JavaScript app, these callbacks will be called. (If the ``KolibriModule`` is registered for asynchronous loading, the Kolibri Module will first be loaded, and then the callbacks called when it is ready. See :doc:`/frontend_architecture/frontend_build_pipeline` for more information.)
+
+All apps should extend the ``KolibriModule`` class found in the `kolibri-module` package as the default export.
+
+The ``ready`` method will be automatically executed once the Module is loaded and registered with the Kolibri Core App. By convention, JavaScript is injected into the served HTML *after* the ``<rootvue>`` tag, meaning that this tag should be available when the ``ready`` method is called, and the root component (conventionally in *vue/index.vue*) can be mounted here.
+
+Creating a side nav entry
+-------------------------
+
+If you want to expose your new single page app as a top level navigation item in the sidebar nav, then it is necessary to create a nav item in your plugin. This is implemented as a hook, which is a combination of the WebpackBundleHook and a navigation hook. So it allows the creation of a navigation item frontend bundle, and signalling that this should be included as a navigation item. Here is an example of it in use.
+
+.. code-block:: python
+
+  from kolibri.core.hooks import NavigationHook
+  from kolibri.plugins.hooks import register_hook
+
+  @register_hook
+  class ExampleNavItem(NavigationHook):
+      bundle_id = "side_nav"
+
+For more information on using `bundle_id` and connecting it to the relevant Javascript entry point read the documentation on the :ref:`Frontend build pipeline`. The entry point for the nav item should minimally do the following:
+
+.. code-block:: js
+
+  import { registerNavItem } from 'kolibri/composables/useNav';
+  import urls from 'kolibri/urls';
+  import { coreStrings } from 'kolibri/uiText/commonCoreStrings';
+  import baseRoutes from '../routes/baseRoutes';
+  import { learnStrings } from './commonLearnStrings';
+
+  registerNavItem({
+    get url() {
+      return urls['kolibri:kolibri.plugins.learn:learn']();
+    },
+    get routes() {
+      return [
+        {
+          label: coreStrings.$tr('homeLabel'),
+          icon: 'dashboard',
+          route: baseRoutes.home.path,
+          name: baseRoutes.home.name,
+        },
+        {
+          label: coreStrings.$tr('libraryLabel'),
+          icon: 'library',
+          route: baseRoutes.library.path,
+          name: baseRoutes.library.name,
+        },
+        {
+          label: coreStrings.$tr('bookmarksLabel'),
+          icon: 'bookmark',
+          route: baseRoutes.bookmarks.path,
+          name: baseRoutes.bookmarks.name,
+        },
+      ];
+    },
+    get label() {
+      return learnStrings.$tr('learnLabel');
+    },
+    icon: 'learn',
+    bottomBar: true,
+  });
+
+
+This will create a navigation component which will be registered to appear in the navigation side bar.
+
+
+Content viewers
+---------------
+
+A special kind of Kolibri Module is dedicated to rendering particular content types. All content renderers should extend the ``ContentViewer`` class found in the `kolibri-viewer` package as the default export. In addition, rather than subclassing the ``WebpackBundleHook`` class, content renderers should be defined in the Python code using the ``ContentRendererHook`` class defined in ``kolibri.content.hooks``. In addition to the standard options for the ``WebpackBundleHook``, the ``ContentRendererHook`` also requires a ``presets`` tuple listing the format presets that it will render.
+
+.. automodule:: kolibri.core.content.hooks
+    :members:
+    :noindex:
+
+The ``ContentViewer`` class has one required property ``viewerComponent`` which should return a Vue component that wraps the content rendering code. The ``ContentViewer`` wrapper accepts a ``contentNode`` prop containing the content metadata (including ``files``, ``lang``, ``options``, and ``duration``), and provides all necessary data to descendant viewer components via the ``useContentViewer`` composable.
+
+The component should use the `useContentViewer` composable, importable as follows:
+
+.. code-block:: javascript
+
+  import useContentViewer from 'kolibri/composables/useContentViewer';
+
+In order to log data about users viewing content, the component should emit ``startTracking``, ``updateProgress``, and ``stopTracking`` events, using the Vue ``$emit`` method. ``startTracking`` and ``stopTracking`` are emitted without any arguments, whereas ``updateProgress`` should be emitted with a single value between 0 and 1 representing the current proportion of progress on the content.
+
+.. code-block:: javascript
+
+  this.$emit('startTracking');
+  this.$emit('stopTracking');
+  this.$emit('updateProgress', 0.25);
+
+For content that has assessment functionality three additional props will be passed: ``itemId``, ``answerState``, and ``showCorrectAnswer``. ``itemId`` is a unique identifier for that content for a particular question in the assessment, ``answerState`` is passed to prefill an answer (one that has been previously given on an exam, or for a coach to preview a learner's given answers), ``showCorrectAnswer`` is a Boolean that determines if the correct answer for the question should be automatically prefilled without user input - this will only be activated in the case that ``answerState`` is falsy - if the renderer is asked to fill in the correct answer, but is unable to do so, it should emit an ``answerUnavailable`` event.
+
+The answer renderer should also define a ``checkAnswer`` method in its component methods, this method should return an object with the following keys: ``correct``, ``answerState``, and ``simpleAnswer`` - describing the correctness, an object describing the answer that can be used to reconstruct it within the renderer, and a simple, human readable answer. If no valid answer is given, ``null`` should be returned. In addition to the base content renderer events, assessment items can also emit a ``hintTaken`` event to indicate that the user has taken a hint in the assessment, an ``itemError`` event to indicate that there has been an error in rendering the requested question corresponding to the ``itemId``, and an ``interaction`` event that indicates a user has interacted with the assessment.
+
+.. code-block:: javascript
+
+  {
+    methods: {
+      checkAnswer() {
+        return {
+          correct: true,
+          answerState: {
+            answer: 81,
+            working: '3^2 = 3 * 3',
+          },
+          simpleAnswer: '81',
+        };
+      },
+    },
+  };
